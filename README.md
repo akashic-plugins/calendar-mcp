@@ -4,10 +4,8 @@ Google Calendar 的 Aka MCP 插件，提供日历工具和主动提醒事件源�
 
 ```text
 calendar-mcp
-├─ .aka-plugin/plugin.json
 ├─ plugin.py
 └─ mcp
-   ├─ servers.json
    ├─ run_mcp.py
    ├─ run_server.py
    └─ src
