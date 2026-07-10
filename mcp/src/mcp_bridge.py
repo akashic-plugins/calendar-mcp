@@ -1,15 +1,19 @@
 import requests
 import json
 import logging
+import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
+from src import proactive_alerts
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # Base URL for the FastAPI server
-BASE_URL = "http://127.0.0.1:8000"
+HOST = os.getenv("HOST", "127.0.0.1")
+PORT = os.getenv("PORT", "18000")
+BASE_URL = f"http://{HOST}:{PORT}"
 
 def create_mcp_server():
     """Creates and configures the MCP server with tools that map to the FastAPI endpoints."""
@@ -379,5 +383,32 @@ def create_mcp_server():
             error_msg = f"An error occurred: {str(e)}"
             logger.error(error_msg, exc_info=True)
             return json.dumps({"error": error_msg})
+
+    @mcp.tool()
+    async def get_proactive_events() -> str:
+        """Returns upcoming calendar events as proactive alert events.
+
+        Uses proactive_alerts.json to control polling calendars and lookahead window.
+        """
+        try:
+            events = proactive_alerts.fetch_proactive_events()
+            return json.dumps(events, ensure_ascii=False)
+        except Exception as e:
+            error_msg = f"An error occurred: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"error": error_msg})
+
+    @mcp.tool()
+    async def acknowledge_events(event_ids: List[str]) -> str:
+        """Acknowledges proactive calendar alerts in local sqlite state."""
+        try:
+            result = proactive_alerts.acknowledge_events(
+                event_ids or [], proactive_alerts.load_config()
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            error_msg = f"An error occurred: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"error": error_msg})
     
-    return mcp 
+    return mcp

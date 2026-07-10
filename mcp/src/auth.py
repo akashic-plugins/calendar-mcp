@@ -5,6 +5,7 @@ import socketserver
 from urllib.parse import urlparse, parse_qs
 import threading
 import logging
+from pathlib import Path
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
@@ -14,13 +15,14 @@ from google.auth.transport.requests import Request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables from .env file
-load_dotenv()
+RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or Path.cwd())
+load_dotenv(RUNTIME_DIR / ".env")
 
 # --- Configuration ---
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-TOKEN_FILE = os.getenv('TOKEN_FILE_PATH', '.gcp-saved-tokens.json')
+_token_path = Path(os.getenv('TOKEN_FILE_PATH', '.gcp-saved-tokens.json'))
+TOKEN_FILE = str(_token_path if _token_path.is_absolute() else RUNTIME_DIR / _token_path)
 SCOPES = [os.getenv('CALENDAR_SCOPES', 'https://www.googleapis.com/auth/calendar')]
 REDIRECT_PORT = int(os.getenv('OAUTH_CALLBACK_PORT', 8080))
 REDIRECT_URI = f'http://localhost:{REDIRECT_PORT}/oauth2callback'
@@ -106,7 +108,7 @@ def start_local_http_server(port, flow, shutdown_event):
     # Let's return the server instance, shutdown called externally based on event.
     return httpd, handler # Returning the handler *type* here. Need instance capture.
 
-def get_credentials():
+def get_credentials(*, interactive: bool = False):
     """Gets valid Google API credentials. Handles loading, refreshing, and the OAuth flow."""
     creds = None
 
@@ -130,11 +132,15 @@ def get_credentials():
             logger.info("Credentials expired. Refreshing...")
             try:
                 creds.refresh(Request())
+                Path(TOKEN_FILE).write_text(creds.to_json(), encoding="utf-8")
                 logger.info("Credentials refreshed successfully.")
             except Exception as e:
                 logger.error(f"Failed to refresh credentials: {e}. Need to re-authenticate.")
                 creds = None # Force re-authentication
         else:
+            if not interactive:
+                logger.error("No valid credentials found. Run src.auth explicitly to authorize.")
+                return None
             logger.info("No valid credentials found or refresh failed. Starting OAuth flow...")
             # Use client_secret dict directly for Flow
             client_config = {
@@ -170,8 +176,7 @@ def get_credentials():
             if creds:
                 # Save the credentials for the next run
                 try:
-                    with open(TOKEN_FILE, 'w') as token_file:
-                        token_file.write(creds.to_json())
+                    Path(TOKEN_FILE).write_text(creds.to_json(), encoding="utf-8")
                     logger.info(f"Credentials saved successfully to {TOKEN_FILE}")
                 except Exception as e:
                     logger.error(f"Failed to save credentials to {TOKEN_FILE}: {e}")
@@ -190,10 +195,10 @@ def get_credentials():
 # Example usage (can be called from server.py)
 if __name__ == '__main__':
     print("Attempting to get Google Calendar credentials...")
-    credentials = get_credentials()
+    credentials = get_credentials(interactive=True)
     if credentials:
         print("Successfully obtained credentials.")
         print(f"Token URI: {credentials.token_uri}")
         # You can now use these credentials to build the service client
     else:
-        print("Failed to obtain credentials.") 
+        print("Failed to obtain credentials.")

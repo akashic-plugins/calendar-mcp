@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "calendar": {
+      "command": [
+        "python",
+        "mcp/run_mcp.py"
+      ],
+      "env": {},
+      "cwd": "."
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "calendar",
+  "version": "0.1.0",
+  "description": "Google Calendar MCP plugin with proactive alerts",
+  "paths": {
+    "mcp_servers": [
+      "mcp/servers.json"
+    ]
+  },
+  "akashic": {
+    "runtime": {
+      "supports": [
+        "lifecycle",
+        "mcp"
+      ]
+    },
+    "lifecycle": {
+      "entry": "plugin.py",
+      "class": "CalendarPlugin",
+      "restart_required": true
+    }
+  }
+}

@@ -66,23 +66,6 @@ app = FastAPI(
 # In a production scenario, consider more robust credential management
 global_credentials: Optional[Credentials] = None
 
-@app.on_event("startup")
-def startup_event():
-    """Attempt to get credentials on server startup."""
-    global global_credentials
-    logger.info("Server starting up. Attempting to authenticate with Google...")
-    try:
-        global_credentials = get_credentials()
-        if not global_credentials or not global_credentials.valid:
-            # Log error but allow server to start; endpoints requiring auth will fail until fixed.
-            logger.error("Failed to obtain valid Google credentials on startup. Endpoints requiring auth will be unavailable.")
-        else:
-            logger.info("Successfully obtained Google credentials.")
-    except Exception as e:
-        logger.error(f"An error occurred during startup authentication: {e}. Endpoints requiring auth will be unavailable.", exc_info=True)
-        # Set credentials to None to indicate failure
-        global_credentials = None
-
 # --- Dependency for Credentials ---
 def get_current_credentials() -> Credentials:
     """Dependency to provide valid credentials to endpoints. Attempts refresh if invalid."""
@@ -706,4 +689,4 @@ def analyze_busyness_endpoint(
 if __name__ == "__main__":
     logger.info("Starting Google Calendar MCP Server...")
     # Note: Startup event runs automatically with uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)

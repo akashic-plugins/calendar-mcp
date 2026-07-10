@@ -3,4 +3,8 @@ google-auth-oauthlib
 google-auth-httplib2
 fastapi
 uvicorn[standard] 
-python-dateutil 
+python-dateutil
+python-dotenv
+requests
+mcp
+email-validator

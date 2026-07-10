@@ -1,0 +1,15 @@
+{
+  "enabled": true,
+  "lookahead_hours": 6,
+  "max_results_per_calendar": 20,
+  "calendar_ids": [
+    "primary"
+  ],
+  "calendar_labels": {
+    "primary": "Google Calendar"
+  },
+  "db_path": "./calendar_alerts.sqlite3",
+  "source_name": "calendar",
+  "source_type": "calendar_alert",
+  "default_severity": "high"
+}

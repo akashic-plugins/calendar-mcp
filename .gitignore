@@ -99,6 +99,9 @@ gcp-oauth.keys.json
 
 # Project specific ignores
 calendar_mcp.log
+calendar_alerts.sqlite3
+proactive_alerts.json
+!mcp/proactive_alerts.json
 openapi_response.json
 task-list.mdc
 TASKS.md
