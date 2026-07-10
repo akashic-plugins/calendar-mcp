@@ -2,14 +2,49 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import cast
 
-from agent.plugins import Plugin
+from pydantic import BaseModel, Field
+
+from agent.plugins import McpServerSpec, Plugin, ProactiveSourceSpec
+
+
+class CalendarProactiveConfig(BaseModel):
+    enabled: bool = True
+
+
+class CalendarConfig(BaseModel):
+    proactive: CalendarProactiveConfig = Field(default_factory=CalendarProactiveConfig)
 
 
 class CalendarPlugin(Plugin):
     name = "calendar"
-    version = "0.1.0"
+    version = "1.0.0"
     desc = "Google Calendar MCP plugin"
+    ConfigModel = CalendarConfig
+
+    @classmethod
+    def mcp_servers(cls) -> list[McpServerSpec]:
+        return [
+            McpServerSpec(
+                name="calendar",
+                command=("python", "mcp/run_mcp.py"),
+            )
+        ]
+
+    def proactive_sources(self) -> list[ProactiveSourceSpec]:
+        config = cast(CalendarConfig, self.context.config)
+        if not config.proactive.enabled:
+            return []
+        return [
+            ProactiveSourceSpec(
+                id="upcoming_events",
+                channels=("alert",),
+                server="calendar",
+                fetch_tool="get_proactive_events",
+                ack_tool="acknowledge_events",
+            )
+        ]
 
     async def initialize(self) -> None:
         data_dir = self.context.data_dir
