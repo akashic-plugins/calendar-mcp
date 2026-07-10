@@ -10,6 +10,11 @@ from dotenv import load_dotenv
 
 RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or Path.cwd())
 load_dotenv(RUNTIME_DIR / ".env")
+os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
+os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
+    RUNTIME_DIR / "proactive_alerts.json"
+)
+os.environ.setdefault("RELOAD", "false")
 LOG_PATH = os.environ.get("CALENDAR_LOG_PATH", str(RUNTIME_DIR / "calendar_mcp.log"))
 
 LOGGING_CONFIG = {

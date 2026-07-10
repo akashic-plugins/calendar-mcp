@@ -6,7 +6,12 @@ from typing import cast
 
 from pydantic import BaseModel, Field
 
-from agent.plugins import McpServerSpec, Plugin, ProactiveSourceSpec
+from agent.plugins import (
+    ManagedServiceSpec,
+    McpServerSpec,
+    Plugin,
+    ProactiveSourceSpec,
+)
 
 
 class CalendarProactiveConfig(BaseModel):
@@ -29,6 +34,17 @@ class CalendarPlugin(Plugin):
             McpServerSpec(
                 name="calendar",
                 command=("python", "mcp/run_mcp.py"),
+            )
+        ]
+
+    @classmethod
+    def managed_services(cls) -> list[ManagedServiceSpec]:
+        return [
+            ManagedServiceSpec(
+                id="calendar_api",
+                command=("python", "mcp/run_server.py"),
+                cwd="mcp",
+                readiness_url="http://127.0.0.1:18000/health",
             )
         ]
 
