@@ -8,7 +8,16 @@ import uvicorn
 from dotenv import load_dotenv
 
 
-RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or Path.cwd())
+def _runtime_dir() -> Path:
+    raw = os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip()
+    if not raw:
+        raise RuntimeError("calendar service 缺少 AKA_PLUGIN_DATA_DIR")
+    path = Path(raw).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+RUNTIME_DIR = _runtime_dir()
 load_dotenv(RUNTIME_DIR / ".env")
 os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
 os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
