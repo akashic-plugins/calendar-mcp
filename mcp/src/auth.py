@@ -15,7 +15,16 @@ from google.auth.transport.requests import Request
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or Path.cwd())
+def _runtime_dir() -> Path:
+    raw = os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip()
+    if not raw:
+        raise RuntimeError("calendar auth 缺少 AKA_PLUGIN_DATA_DIR")
+    path = Path(raw).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+RUNTIME_DIR = _runtime_dir()
 load_dotenv(RUNTIME_DIR / ".env")
 
 # --- Configuration ---

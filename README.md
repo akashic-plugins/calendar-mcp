@@ -19,4 +19,4 @@ calendar-mcp
 - `calendar_alerts.sqlite3`：提醒确认状态
 - `calendar_mcp.log`：运行日志
 
-首次加载会从 `~/.akashic/workspace/mcp/calendar-mcp/` 复制旧配置和状态。刷新 OAuth Token 后会立即写回数据目录，避免每次主动轮询重复刷新。
+首次加载会从 `$AKASHIC_WORKSPACE/mcp/calendar-mcp/` 复制旧配置和状态。刷新 OAuth Token 后会立即写回数据目录，避免每次主动轮询重复刷新。

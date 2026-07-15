@@ -10,7 +10,10 @@ from dotenv import load_dotenv
 
 def _configure_environment() -> Path:
     script_dir = Path(__file__).resolve().parent
-    data_dir = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or script_dir)
+    raw_data_dir = os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip()
+    if not raw_data_dir:
+        raise RuntimeError("calendar MCP 缺少 AKA_PLUGIN_DATA_DIR")
+    data_dir = Path(raw_data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
     load_dotenv(data_dir / ".env")
     os.environ["TOKEN_FILE_PATH"] = str(data_dir / ".gcp-saved-tokens.json")

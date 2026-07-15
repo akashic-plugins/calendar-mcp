@@ -65,8 +65,10 @@ class CalendarPlugin(Plugin):
     async def initialize(self) -> None:
         data_dir = self.context.data_dir
         workspace = self.context.workspace
-        if data_dir is None or workspace is None:
-            return
+        if data_dir is None:
+            raise RuntimeError("calendar 缺少插件数据目录")
+        if workspace is None:
+            raise RuntimeError("calendar 缺少 workspace")
         data_dir.mkdir(parents=True, exist_ok=True)
         legacy_dir = workspace / "mcp" / "calendar-mcp"
         for name in (
