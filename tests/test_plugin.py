@@ -1,5 +1,4 @@
 import importlib.util
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -59,15 +58,15 @@ def test_mcp_rejects_missing_plugin_data_dir(monkeypatch) -> None:
         module._configure_environment()
 
 
-def test_initialize_rejects_missing_context_paths(tmp_path: Path) -> None:
+def test_activate_rejects_missing_context_paths(tmp_path: Path) -> None:
     plugin = CalendarPlugin()
     plugin.context = SimpleNamespace(data_dir=None, workspace=tmp_path)
     with pytest.raises(RuntimeError, match="数据目录"):
-        asyncio.run(plugin.initialize())
+        plugin.activate()
 
     plugin.context = SimpleNamespace(data_dir=tmp_path, workspace=None)
     with pytest.raises(RuntimeError, match="workspace"):
-        asyncio.run(plugin.initialize())
+        plugin.activate()
 
 
 @pytest.mark.parametrize(

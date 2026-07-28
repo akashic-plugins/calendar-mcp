@@ -6,5 +6,5 @@ uvicorn[standard]
 python-dateutil
 python-dotenv
 requests
-mcp
+mcp==1.28.1
 email-validator

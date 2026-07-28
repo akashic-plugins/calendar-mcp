@@ -23,6 +23,7 @@ class CalendarConfig(BaseModel):
 
 
 class CalendarPlugin(Plugin):
+    api_version = 2
     name = "calendar"
     version = "1.0.0"
     desc = "Google Calendar MCP plugin"
@@ -62,7 +63,7 @@ class CalendarPlugin(Plugin):
             )
         ]
 
-    async def initialize(self) -> None:
+    def activate(self) -> None:
         data_dir = self.context.data_dir
         workspace = self.context.workspace
         if data_dir is None:
