@@ -390,13 +390,8 @@ def create_mcp_server():
 
         Uses proactive_alerts.json to control polling calendars and lookahead window.
         """
-        try:
-            events = proactive_alerts.fetch_proactive_events()
-            return json.dumps(events, ensure_ascii=False)
-        except Exception as e:
-            error_msg = f"An error occurred: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return json.dumps({"error": error_msg})
+        events = proactive_alerts.fetch_proactive_events()
+        return json.dumps(events, ensure_ascii=False)
 
     @mcp.tool()
     async def acknowledge_events(event_ids: List[str]) -> str:
