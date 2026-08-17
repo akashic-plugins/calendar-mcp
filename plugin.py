@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-from typing import cast
-
 from pydantic import BaseModel, Field
 
-from agent.plugins import (
-    ManagedServiceSpec,
-    McpServerSpec,
-    Plugin,
-    ProactiveSourceSpec,
+from agent.plugin_composition import (
+    MANAGED_PROCESSES,
+    MCP_SERVERS,
+    PROACTIVE_COMPONENTS,
+    Context,
+    EndpointEnv,
+    ManagedProcessDefinition,
+    McpServerDefinition,
+    ProactiveSourceDefinition,
 )
 
 
@@ -22,66 +22,63 @@ class CalendarConfig(BaseModel):
     proactive: CalendarProactiveConfig = Field(default_factory=CalendarProactiveConfig)
 
 
-class CalendarPlugin(Plugin):
-    api_version = 2
-    name = "calendar"
-    version = "1.0.0"
-    desc = "Google Calendar MCP plugin"
-    ConfigModel = CalendarConfig
+api_version = 3
+name = "calendar"
+version = "3.0.0"
+desc = "Google Calendar MCP plugin"
+Config = CalendarConfig
+inject = (MANAGED_PROCESSES, MCP_SERVERS, PROACTIVE_COMPONENTS)
 
-    @classmethod
-    def mcp_servers(cls) -> list[McpServerSpec]:
-        return [
-            McpServerSpec(
-                name="calendar",
-                command=("python", "mcp/run_mcp.py"),
-            )
-        ]
 
-    @classmethod
-    def managed_services(cls) -> list[ManagedServiceSpec]:
-        return [
-            ManagedServiceSpec(
-                id="calendar_api",
-                command=("python", "mcp/run_server.py"),
-                cwd="mcp",
-                readiness_url="http://127.0.0.1:18000/health",
-            )
-        ]
+async def apply(ctx: Context, config: object) -> None:
+    """注册 Calendar 运行时与可选的主动事件源。"""
 
-    def proactive_sources(self) -> list[ProactiveSourceSpec]:
-        config = cast(CalendarConfig, self.context.config)
-        if not config.proactive.enabled:
-            return []
-        return [
-            ProactiveSourceSpec(
-                id="upcoming_events",
+    if not isinstance(config, CalendarConfig):
+        raise TypeError("calendar config 必须是 CalendarConfig")
+
+    # 1. 声明后端进程和 MCP；apply 本身不启动运行时
+    await ctx.require(MANAGED_PROCESSES).register(
+        ctx,
+        ManagedProcessDefinition(
+            name="calendar_api",
+            command=("python", "mcp/run_server.py"),
+            env={
+                "GOOGLE_CLIENT_ID": "",
+                "GOOGLE_CLIENT_SECRET": "",
+                "HOST": "127.0.0.1",
+            },
+            port_env="PORT",
+            formal_port=18000,
+            readiness_path="/health",
+            startup_timeout_seconds=15.0,
+        ),
+    )
+    await ctx.require(MCP_SERVERS).register(
+        ctx,
+        McpServerDefinition(
+            name="calendar",
+            command=("python", "mcp/run_mcp.py"),
+            required_tools=("get_proactive_events", "acknowledge_events"),
+            candidate_read_only_tools=("get_proactive_events",),
+            endpoint_env=(EndpointEnv("PORT", "calendar_api"),),
+            candidate_env={
+                "CALENDAR_BACKEND": "recording",
+                "GOOGLE_CLIENT_ID": "",
+                "GOOGLE_CLIENT_SECRET": "",
+                "HOST": "127.0.0.1",
+            },
+        ),
+    )
+
+    # 2. 仅由用户配置决定是否发布主动事件源
+    if config.proactive.enabled:
+        await ctx.require(PROACTIVE_COMPONENTS).register(
+            ctx,
+            ProactiveSourceDefinition(
+                name="upcoming_events",
                 channels=("alert",),
-                server="calendar",
+                mcp_server="calendar",
                 fetch_tool="get_proactive_events",
                 ack_tool="acknowledge_events",
-            )
-        ]
-
-    def activate(self) -> None:
-        data_dir = self.context.data_dir
-        workspace = self.context.workspace
-        if data_dir is None:
-            raise RuntimeError("calendar 缺少插件数据目录")
-        if workspace is None:
-            raise RuntimeError("calendar 缺少 workspace")
-        data_dir.mkdir(parents=True, exist_ok=True)
-        legacy_dir = workspace / "mcp" / "calendar-mcp"
-        for name in (
-            ".env",
-            ".gcp-saved-tokens.json",
-            "proactive_alerts.json",
-            "calendar_alerts.sqlite3",
-        ):
-            source = legacy_dir / name
-            target = data_dir / name
-            if source.exists() and not target.exists():
-                shutil.copy2(source, target)
-        config = data_dir / "proactive_alerts.json"
-        if not config.exists():
-            shutil.copy2(self.context.plugin_dir / "mcp" / "proactive_alerts.json", config)
+            ),
+        )

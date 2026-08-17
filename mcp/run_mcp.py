@@ -15,13 +15,13 @@ def _configure_environment() -> Path:
         raise RuntimeError("calendar MCP 缺少 AKA_PLUGIN_DATA_DIR")
     data_dir = Path(raw_data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
-    load_dotenv(data_dir / ".env")
+    load_dotenv(data_dir / ".env", override=True)
     os.environ["TOKEN_FILE_PATH"] = str(data_dir / ".gcp-saved-tokens.json")
     os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
         data_dir / "proactive_alerts.json"
     )
-    os.environ["CALENDAR_LOG_PATH"] = str(data_dir / "calendar_mcp.log")
     os.environ.setdefault("RELOAD", "false")
+    os.environ["HOST"] = "127.0.0.1"
     os.chdir(script_dir)
     if str(script_dir) not in sys.path:
         sys.path.insert(0, str(script_dir))

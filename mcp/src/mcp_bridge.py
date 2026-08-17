@@ -5,7 +5,6 @@ import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
-from src import proactive_alerts
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -390,25 +389,64 @@ def create_mcp_server():
 
         Uses proactive_alerts.json to control polling calendars and lookahead window.
         """
-        try:
-            events = proactive_alerts.fetch_proactive_events()
-            return json.dumps(events, ensure_ascii=False)
-        except Exception as e:
-            error_msg = f"An error occurred: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return json.dumps({"error": error_msg})
+        return json.dumps(_fetch_proactive_events(), ensure_ascii=False)
 
     @mcp.tool()
     async def acknowledge_events(event_ids: List[str]) -> str:
         """Acknowledges proactive calendar alerts in local sqlite state."""
-        try:
-            result = proactive_alerts.acknowledge_events(
-                event_ids or [], proactive_alerts.load_config()
-            )
-            return json.dumps(result, ensure_ascii=False)
-        except Exception as e:
-            error_msg = f"An error occurred: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            return json.dumps({"error": error_msg})
+        return json.dumps(
+            _acknowledge_proactive_events(event_ids or []),
+            ensure_ascii=False,
+        )
     
     return mcp
+
+
+def _proactive_fetch_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """为 Core 主动事件端口编码明确的拉取结果。"""
+
+    if not events:
+        return {"status": "empty"}
+    return {"status": "items", "items": events}
+
+
+def _fetch_proactive_events() -> dict[str, Any]:
+    """候选使用本地 recording 结果，正式运行时才加载 Google 依赖。"""
+
+    if os.environ.get("CALENDAR_BACKEND") == "recording":
+        return {"status": "empty"}
+    from src import proactive_alerts
+
+    return _proactive_fetch_payload(proactive_alerts.fetch_proactive_events())
+
+
+def _acknowledge_proactive_events(requested: list[str]) -> dict[str, Any]:
+    """正式运行时确认事件；recording 后端禁止产生确认副作用。"""
+
+    if os.environ.get("CALENDAR_BACKEND") == "recording":
+        raise RuntimeError("calendar recording backend 不允许确认事件")
+    from src import proactive_alerts
+
+    result = proactive_alerts.acknowledge_events(
+        requested,
+        proactive_alerts.load_config(),
+    )
+    return _proactive_ack_payload(requested, result)
+
+
+def _proactive_ack_payload(
+    requested: list[str],
+    result: dict[str, list[str]],
+) -> dict[str, Any]:
+    """仅在所有请求 ID 都持久确认后编码 committed。"""
+
+    acknowledged = list(result.get("acknowledged", []))
+    failed = list(result.get("failed", []))
+    if failed or acknowledged != requested:
+        return {
+            "status": "failure",
+            "error": "calendar ack 未完整提交",
+            "retryable": True,
+            "failed_ids": failed,
+        }
+    return {"status": "committed", "ids": acknowledged}
