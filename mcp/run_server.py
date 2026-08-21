@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging.config
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -18,13 +19,12 @@ def _runtime_dir() -> Path:
 
 
 RUNTIME_DIR = _runtime_dir()
-load_dotenv(RUNTIME_DIR / ".env")
+load_dotenv(RUNTIME_DIR / ".env", override=True)
 os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
 os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
     RUNTIME_DIR / "proactive_alerts.json"
 )
 os.environ.setdefault("RELOAD", "false")
-LOG_PATH = os.environ.get("CALENDAR_LOG_PATH", str(RUNTIME_DIR / "calendar_mcp.log"))
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -38,21 +38,19 @@ LOGGING_CONFIG = {
             "class": "logging.StreamHandler",
             "stream": "ext://sys.stderr",
         },
-        "file": {
-            "formatter": "default",
-            "class": "logging.FileHandler",
-            "filename": LOG_PATH,
-            "mode": "a",
-        },
     },
-    "root": {"handlers": ["default", "file"], "level": "INFO"},
+    "root": {"handlers": ["default"], "level": "INFO"},
 }
 
 
 def main() -> None:
+    script_dir = Path(__file__).resolve().parent
+    os.chdir(script_dir)
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
     uvicorn.run(
         "src.server:app",
-        host=os.environ.get("HOST", "127.0.0.1"),
+        host="127.0.0.1",
         port=int(os.environ.get("PORT", "18000")),
         reload=False,
         log_config=LOGGING_CONFIG,

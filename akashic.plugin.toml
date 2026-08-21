@@ -1,0 +1,28 @@
+schema_version = 1
+name = "calendar"
+version = "3.0.0"
+api_version = 3
+entrypoint = "plugin.py"
+
+[[python]]
+requirements = "mcp/requirements.txt"
+
+[validation]
+exclude_data_paths = [".env", ".gcp-saved-tokens.json", ".calendar-v2-migration.json"]
+
+[[processes]]
+name = "calendar_api"
+command = ["python", "mcp/run_server.py"]
+env = {GOOGLE_CLIENT_ID = "", GOOGLE_CLIENT_SECRET = "", HOST = "127.0.0.1"}
+port_env = "PORT"
+formal_port = 18000
+readiness_path = "/health"
+startup_timeout_seconds = 15.0
+
+[[mcp]]
+name = "calendar"
+command = ["python", "mcp/run_mcp.py"]
+required_tools = ["get_proactive_events", "acknowledge_events"]
+candidate_read_only_tools = ["get_proactive_events"]
+endpoint_env = [{env = "PORT", process = "calendar_api"}]
+candidate_env = {CALENDAR_BACKEND = "recording", GOOGLE_CLIENT_ID = "", GOOGLE_CLIENT_SECRET = "", HOST = "127.0.0.1"}
