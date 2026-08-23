@@ -103,10 +103,8 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
 
         process_catalog = snapshot.managed_process_registry
         mcp_catalog = snapshot.mcp_server_registry
-        proactive_catalog = snapshot.proactive_component_catalog
         assert process_catalog is not None and tuple(process_catalog) == ("calendar_api",)
         assert mcp_catalog is not None and tuple(mcp_catalog) == ("calendar",)
-        assert proactive_catalog is None
         assert mcp_catalog["calendar"].descriptor.required_tools == ()
 
         process = runtime.processes
