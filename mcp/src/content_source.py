@@ -105,7 +105,9 @@ class CalendarContentStore:
             ).fetchone()
             return _batch_row(row) if row is not None else None
 
-    def freeze(self, events: list[dict[str, object]], now: datetime) -> dict[str, object]:
+    def freeze(
+        self, events: list[dict[str, object]], now: datetime
+    ) -> dict[str, object] | None:
         """Freeze one immutable batch without advancing the source cursor."""
 
         now_text = _utc(now)
@@ -119,7 +121,6 @@ class CalendarContentStore:
             if active is not None:
                 return _batch_row(active)
 
-            self._purge_expired(connection, now_text)
             for event in events:
                 self._upsert_pending(connection, event, now)
             cursor = int(
@@ -130,13 +131,15 @@ class CalendarContentStore:
             rows = connection.execute(
                 """
                 SELECT event_id, revision, starts_at, title, content,
-                       raw_event_id, calendar_id
+                       raw_event_id, calendar_id, payload_json, payload_origin
                 FROM pending_alerts
                 WHERE submitted_batch_id IS NULL
                 ORDER BY event_id
                 """
             ).fetchall()
             items = [_content_item(row) for row in rows]
+            if not items:
+                return None
             fingerprint = json.dumps(items, sort_keys=True, separators=(",", ":"))
             digest = hashlib.sha256(f"{cursor}\0{fingerprint}".encode()).hexdigest()[:20]
             batch_id = f"calendar:{cursor}:{digest}"
@@ -150,6 +153,7 @@ class CalendarContentStore:
                 (batch_id, cursor, next_cursor, fingerprint, now_text),
             )
             return {
+                "status": "batch",
                 "batch_id": batch_id,
                 "cursor": cursor,
                 "next_cursor": next_cursor,
@@ -256,6 +260,7 @@ class CalendarContentStore:
                     "ALTER TABLE pending_alerts RENAME TO legacy_pending_alerts"
                 )
             connection.executescript(_V1_SCHEMA)
+            fallback_config = load_config()
             for row in acknowledged:
                 connection.execute(
                     """
@@ -270,13 +275,20 @@ class CalendarContentStore:
             for row in pending:
                 connection.execute(
                     """
-                    INSERT INTO pending_alerts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO pending_alerts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["event_id"], row["raw_event_id"], row["calendar_id"],
                         row.get("starts_at"), row.get("title"), row.get("content"),
                         row["last_seen_at"], row["expires_at"],
                         row.get("revision", "1"), row.get("submitted_batch_id"),
+                        json.dumps(
+                            _legacy_payload(row, fallback_config),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        "legacy_fallback",
                     ),
                 )
             connection.execute("DROP TABLE IF EXISTS legacy_acknowledged_alerts")
@@ -337,11 +349,10 @@ class CalendarContentStore:
             """
             INSERT INTO pending_alerts(
                 event_id, raw_event_id, calendar_id, starts_at, title, content,
-                last_seen_at, expires_at, revision, submitted_batch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            ON CONFLICT(event_id) DO UPDATE SET
-                last_seen_at = excluded.last_seen_at,
-                expires_at = excluded.expires_at
+                last_seen_at, expires_at, revision, submitted_batch_id,
+                payload_json, payload_origin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'full')
+            ON CONFLICT(event_id) DO NOTHING
             """,
             (
                 event_id,
@@ -353,15 +364,13 @@ class CalendarContentStore:
                 _utc(now),
                 _utc(now + timedelta(hours=load_config().lookahead_hours + 24)),
                 event["revision"],
+                json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             ),
-        )
-
-    @staticmethod
-    def _purge_expired(connection: sqlite3.Connection, now: str) -> None:
-        connection.execute("DELETE FROM acknowledged_alerts WHERE expires_at <= ?", (now,))
-        connection.execute(
-            "DELETE FROM pending_alerts WHERE expires_at <= ? AND submitted_batch_id IS NULL",
-            (now,),
         )
 
     @contextmanager
@@ -399,7 +408,8 @@ def poll_content() -> dict[str, object]:
     for calendar_id in config.calendar_ids:
         label = config.calendar_labels.get(calendar_id, calendar_id)
         events.extend(_fetch_events(calendar_id, label, config, now))
-    return store.freeze(events, now)
+    batch = store.freeze(events, now)
+    return {"status": "no_batch"} if batch is None else batch
 
 
 def commit_content_batch(batch_id: str) -> dict[str, object]:
@@ -491,18 +501,7 @@ def _content_item(row: sqlite3.Row) -> dict[str, object]:
     return {
         "item_id": row["event_id"],
         "revision": row["revision"],
-        "payload": {
-            "kind": "alert",
-            "source_type": "calendar_alert",
-            "source_name": "calendar",
-            "title": row["title"],
-            "content": row["content"],
-            "published_at": row["starts_at"],
-            "metrics": {
-                "calendar_id": row["calendar_id"],
-                "raw_event_id": row["raw_event_id"],
-            },
-        },
+        "payload": json.loads(row["payload_json"]),
         "not_before": row["starts_at"],
         "requires_ack": True,
     }
@@ -510,10 +509,32 @@ def _content_item(row: sqlite3.Row) -> dict[str, object]:
 
 def _batch_row(row: sqlite3.Row) -> dict[str, object]:
     return {
+        "status": "batch",
         "batch_id": row["batch_id"],
         "cursor": int(row["cursor"]),
         "next_cursor": int(row["next_cursor"]),
         "items": json.loads(row["items_json"]),
+    }
+
+
+def _legacy_payload(
+    row: dict[str, object], config: CalendarContentConfig
+) -> dict[str, object]:
+    """Reconstruct only legacy fields that the old pending schema retained."""
+
+    return {
+        "event_id": row["event_id"],
+        "revision": row.get("revision", "1"),
+        "kind": "alert",
+        "source_type": config.source_type,
+        "source_name": config.source_name,
+        "title": row.get("title"),
+        "content": row.get("content"),
+        "published_at": row.get("starts_at"),
+        "metrics": {
+            "calendar_id": row["calendar_id"],
+            "raw_event_id": row["raw_event_id"],
+        },
     }
 
 
@@ -548,7 +569,9 @@ CREATE TABLE pending_alerts(
     last_seen_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     revision TEXT NOT NULL,
-    submitted_batch_id TEXT
+    submitted_batch_id TEXT,
+    payload_json TEXT NOT NULL,
+    payload_origin TEXT NOT NULL CHECK(payload_origin IN ('full', 'legacy_fallback'))
 );
 CREATE TABLE source_state(
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),

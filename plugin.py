@@ -149,13 +149,15 @@ class CalendarSourceRuntime:
         self._task: asyncio.Task[None] | None = None
         self._closed = False
 
-    async def start(self) -> None:
-        """Arm exactly one immediate formal-runtime poll."""
+    async def start(self, ctx: Context) -> None:
+        """Spawn exactly one Fiber-owned formal-runtime poll loop."""
 
         if self._closed:
             raise RuntimeError("calendar Content runtime 已关闭")
-        if self._handle is None:
-            self._arm(datetime.now(UTC))
+        if self._task is None:
+            self._task = await ctx.spawn(
+                self._run(), name="calendar-content-poll"
+            )
 
     async def close(self) -> None:
         """Cancel the owned timer/task without changing durable progress."""
@@ -172,32 +174,27 @@ class CalendarSourceRuntime:
         if handle is not None:
             await handle.cleanup()
 
-    def _arm(self, deadline: datetime) -> None:
-        if self._closed or self._handle is not None:
-            return
-        handle = self._timers.schedule(deadline)
-        self._handle = handle
-        self._task = asyncio.create_task(
-            self._wait_tick_rearm(handle), name="calendar-content:poll"
-        )
+    async def _run(self) -> None:
+        """Wait, poll, and re-arm while Fiber ownership remains healthy."""
 
-    async def _wait_tick_rearm(self, handle: TimerHandle) -> None:
-        """Run one recoverable source tick, then schedule the next attempt."""
-
-        try:
-            receipt = await handle.result()
-            if receipt.status is TimerStatus.CANCELLED or self._closed:
-                return
+        deadline = datetime.now(UTC)
+        while not self._closed:
+            handle = self._timers.schedule(deadline)
+            self._handle = handle
             try:
-                await self._tick()
-            except CalendarContentApiError:
-                logger.exception("calendar Content tick failed; next timer will retry")
-        finally:
-            self._handle = None
-            self._task = None
-            await handle.cleanup()
-            if not self._closed:
-                self._arm(datetime.now(UTC) + self._interval)
+                receipt = await handle.result()
+                if receipt.status is TimerStatus.CANCELLED or self._closed:
+                    return
+                try:
+                    await self._tick()
+                except CalendarContentApiError:
+                    logger.exception(
+                        "calendar Content transport failed; next timer will retry"
+                    )
+            finally:
+                self._handle = None
+                await handle.cleanup()
+            deadline = datetime.now(UTC) + self._interval
 
     async def _tick(self) -> None:
         """Settle delivered items, then submit and commit one stable poll batch."""
@@ -212,6 +209,11 @@ class CalendarSourceRuntime:
 
         # 2. Calendar freezes a batch; Core deduplicates replay by batch and revision.
         batch = await self._api.poll()
+        status = batch.get("status")
+        if status == "no_batch":
+            return
+        if status != "batch":
+            raise RuntimeError(f"calendar Content batch status 无效: {status!r}")
         batch_id = str(batch["batch_id"])
         items = batch["items"]
         if not isinstance(items, list):
@@ -257,5 +259,5 @@ async def apply(ctx: Context, config: object) -> None:
         return runtime.close
 
     _ = await ctx.effect(setup, label="calendar-content-runtime")
-    _ = await ctx.on(RUNTIME_STARTED, lambda _event: runtime.start())
+    _ = await ctx.on(RUNTIME_STARTED, lambda _event: runtime.start(ctx))
     _ = await ctx.on(RUNTIME_STOPPING, lambda _event: runtime.close())

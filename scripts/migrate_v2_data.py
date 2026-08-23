@@ -284,7 +284,9 @@ def _upgrade_v1_receipt(path: Path, *, target: Path, marketplace: str) -> None:
         if new_config.exists() and new_config.read_text(encoding="utf-8") != payload:
             raise FileExistsError(f"Calendar Content config 已存在且内容不同: {new_config}")
         if not new_config.exists():
-            new_config.write_text(payload, encoding="utf-8")
+            staged_config = target / "content.json.migrating"
+            staged_config.write_text(payload, encoding="utf-8")
+            os.replace(staged_config, new_config)
         config_item.update(
             source_name="proactive_alerts.json",
             name="content.json",
@@ -301,8 +303,13 @@ def _upgrade_v1_receipt(path: Path, *, target: Path, marketplace: str) -> None:
     )
     os.replace(staged_receipt, path)
 
-    # 3. The retained v2 source is recovery; the old plugin-data config is obsolete.
-    old_config.unlink(missing_ok=True)
+
+
+def _retire_v1_config(target: Path) -> None:
+    """Remove the obsolete config only after the v2 receipt is durable."""
+
+    (target / "proactive_alerts.json").unlink(missing_ok=True)
+    (target / "content.json.migrating").unlink(missing_ok=True)
 
 
 def migrate_v2_data(*, workspace: Path, marketplace: str) -> Path:
@@ -337,6 +344,7 @@ def _migrate_locked(*, workspace: Path, marketplace: str) -> Path:
     receipt_path = target / _RECEIPT
     _upgrade_v1_receipt(receipt_path, target=target, marketplace=marketplace)
     if _has_valid_receipt(receipt_path, target=target, marketplace=marketplace):
+        _retire_v1_config(target)
         return receipt_path
 
     staging = workspace / "plugin-data" / f".calendar-v2-migrate-{uuid.uuid4().hex}"

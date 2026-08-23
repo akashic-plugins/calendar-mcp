@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -18,6 +19,11 @@ def _event(event_id: str, revision: str = "rev-1") -> dict[str, object]:
         "revision": revision,
         "title": f"title-{event_id}",
         "content": f"content-{event_id}",
+        "url": f"https://calendar.example/{event_id}",
+        "severity": "high",
+        "source_name": "configured-calendar",
+        "source_type": "configured-alert",
+        "kind": "alert",
         "published_at": (NOW + timedelta(hours=1)).isoformat(),
         "metrics": {"raw_event_id": event_id, "calendar_id": "primary"},
     }
@@ -29,13 +35,16 @@ def test_freeze_replays_same_batch_and_commit_advances_cursor_once(tmp_path) -> 
 
     first = store.freeze([_event("event-1")], NOW)
     replay = store.freeze([_event("event-2")], NOW + timedelta(minutes=1))
+    assert first is not None
     committed = store.commit(str(first["batch_id"]), NOW)
     duplicate = store.commit(str(first["batch_id"]), NOW)
     second = store.freeze([_event("event-2")], NOW + timedelta(minutes=2))
+    assert second is not None
 
     assert replay == first
     first_items = cast(list[dict[str, object]], first["items"])
     assert [item["item_id"] for item in first_items] == ["event-1"]
+    assert first_items[0]["payload"] == _event("event-1")
     assert committed == {"committed": True, "duplicate": False}
     assert duplicate == {"committed": True, "duplicate": True}
     assert second["cursor"] == 1
@@ -47,6 +56,7 @@ def test_provider_ack_is_idempotent_and_preserves_legacy_fact_tables(tmp_path) -
     store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
     store.initialize()
     batch = store.freeze([_event("event-1")], NOW)
+    assert batch is not None
     _ = store.commit(str(batch["batch_id"]), NOW)
 
     first = store.acknowledge("event-1", NOW)
@@ -89,8 +99,20 @@ def test_legacy_schema_migrates_with_recovery_copy_and_exact_v1(tmp_path) -> Non
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA user_version").fetchone() == (1,)
         assert connection.execute(
-            "SELECT event_id, revision, submitted_batch_id FROM pending_alerts"
-        ).fetchone() == ("legacy", "1", None)
+            """
+            SELECT event_id, revision, submitted_batch_id, payload_origin,
+                   payload_json FROM pending_alerts
+            """
+        ).fetchone()[:4] == ("legacy", "1", None, "legacy_fallback")
+        payload = json.loads(
+            connection.execute("SELECT payload_json FROM pending_alerts").fetchone()[0]
+        )
+        assert payload["title"] == "legacy title"
+        assert payload["metrics"] == {
+            "calendar_id": "primary",
+            "raw_event_id": "raw",
+        }
+        assert "url" not in payload
 
 
 def test_same_version_malformed_schema_is_rejected(tmp_path) -> None:
@@ -101,3 +123,63 @@ def test_same_version_malformed_schema_is_rejected(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="schema 不匹配"):
         CalendarContentStore(path).initialize()
+
+
+def test_empty_poll_creates_no_batch_cursor_or_row(tmp_path) -> None:
+    store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
+    store.initialize()
+
+    assert store.freeze([], NOW) is None
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT cursor FROM source_state").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM poll_batches").fetchone() == (0,)
+        assert connection.execute("SELECT count(*) FROM pending_alerts").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM acknowledged_alerts"
+        ).fetchone() == (0,)
+
+
+def test_committed_batches_and_ack_history_are_never_purged(tmp_path) -> None:
+    store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
+    store.initialize()
+    first = store.freeze([_event("event-1")], NOW)
+    assert first is not None
+    _ = store.commit(str(first["batch_id"]), NOW)
+    _ = store.acknowledge("event-1", NOW)
+    second = store.freeze([_event("event-2")], NOW + timedelta(minutes=1))
+    assert second is not None
+    _ = store.commit(str(second["batch_id"]), NOW)
+    _ = store.acknowledge("event-2", NOW)
+
+    assert store.freeze([], NOW + timedelta(days=30)) is None
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT count(*) FROM poll_batches").fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM acknowledged_alerts"
+        ).fetchone() == (2,)
+
+
+def test_repoll_of_submitted_revision_is_a_database_no_op(tmp_path) -> None:
+    store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
+    store.initialize()
+    first = store.freeze([_event("event-1")], NOW)
+    assert first is not None
+    _ = store.commit(str(first["batch_id"]), NOW)
+    with sqlite3.connect(store.path) as connection:
+        before = connection.execute(
+            "SELECT cursor, (SELECT count(*) FROM poll_batches), "
+            "(SELECT last_seen_at FROM pending_alerts WHERE event_id='event-1') "
+            "FROM source_state"
+        ).fetchone()
+
+    assert store.freeze([_event("event-1")], NOW + timedelta(hours=1)) is None
+
+    with sqlite3.connect(store.path) as connection:
+        after = connection.execute(
+            "SELECT cursor, (SELECT count(*) FROM poll_batches), "
+            "(SELECT last_seen_at FROM pending_alerts WHERE event_id='event-1') "
+            "FROM source_state"
+        ).fetchone()
+    assert after == before

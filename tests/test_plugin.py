@@ -63,6 +63,7 @@ class RecordingContent:
 class RecordingApi:
     def __init__(self) -> None:
         self.batch = {
+            "status": "batch",
             "batch_id": "calendar:0:stable",
             "items": [
                 {
@@ -263,8 +264,9 @@ async def test_start_and_reload_own_exactly_one_real_timer() -> None:
         PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
     )
 
-    await runtime.start()
-    await runtime.start()
+    root = CompositionRoot("calendar-timer-test")
+    await runtime.start(root.context)
+    await runtime.start(root.context)
     for _ in range(100):
         if api.polls == 1:
             break
@@ -274,10 +276,11 @@ async def test_start_and_reload_own_exactly_one_real_timer() -> None:
     await runtime.close()
     assert runtime._handle is None
     assert runtime._task is None
+    await root.dispose()
 
 
 @pytest.mark.asyncio
-async def test_http_boundary_failure_is_logged_and_rearmed() -> None:
+async def test_http_boundary_failure_is_logged_and_rearmed(caplog) -> None:
     content = RecordingContent()
     api = RecordingApi()
     api.poll_failures = 1
@@ -285,15 +288,22 @@ async def test_http_boundary_failure_is_logged_and_rearmed() -> None:
         PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
     )
 
-    await runtime.start()
+    root = CompositionRoot("calendar-http-retry")
+    await runtime.start(root.context)
     first_task = runtime._task
     assert first_task is not None
-    await first_task
+    for _ in range(100):
+        if api.polls == 1 and runtime._handle is not None:
+            break
+        await asyncio.sleep(0.001)
 
     assert api.polls == 1
+    assert not first_task.done()
     assert runtime._handle is not None
     assert runtime._task is not None
+    assert sum("transport failed" in row.message for row in caplog.records) == 1
     await runtime.close()
+    await root.dispose()
 
 
 @pytest.mark.asyncio
@@ -305,12 +315,36 @@ async def test_content_contract_error_remains_fail_loud_after_cleanup() -> None:
         PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
     )
 
-    await runtime.start()
+    root = CompositionRoot("calendar-contract-failure")
+    await runtime.start(root.context)
     first_task = runtime._task
     assert first_task is not None
     with pytest.raises(RuntimeError, match="Content contract broken"):
         await first_task
 
     assert api.commits == []
-    assert runtime._handle is not None
+    assert runtime._handle is None
+    receipt = root.receipt()
+    assert receipt.ready is False
+    assert any(
+        incident.kind == "task_failure"
+        and "Content contract broken" in incident.message
+        for incident in receipt.incidents
+    )
     await runtime.close()
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_batch_has_zero_content_or_cursor_effect() -> None:
+    content = RecordingContent()
+    api = RecordingApi()
+    api.batch = {"status": "no_batch"}
+    runtime = CalendarSourceRuntime(
+        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
+    )
+
+    await runtime._tick()
+
+    assert content.submissions == []
+    assert api.commits == []

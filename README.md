@@ -50,5 +50,19 @@ plugin-data `.env` 读取 OAuth 配置。刷新 OAuth Token 后会立即写回�
 每次 Timer 到点后，Calendar API 先冻结稳定 batch，插件调用 `Content.submit`，
 成功后才 CAS 推进 Calendar cursor。交付完成后，插件先幂等确认 Calendar event，
 再调用 `Content.ack`。任一步崩溃都会用同一 batch、item revision 或 event ID 重放。
+没有新 item 时 API 明确返回 `no_batch`，不会调用 Content、创建 batch 或推进 cursor。
 旧 `calendar_alerts.sqlite3` 的 pending/ack 事实会保留；第一次 schema 升级前会留下
 `calendar_alerts.sqlite3.pre-content-v1.bak` 恢复副本。
+
+```text
+Timer ──▶ Calendar poll
+              ├── no_batch ──▶ 等下一次 Timer
+              └── batch ─────▶ Content.submit ──▶ cursor commit
+
+Content.unsettled ──▶ Calendar ACK ──▶ Content.ack
+```
+
+已提交的 batch 和 Calendar ACK 历史全量保留，不用诊断日志代替真实 handoff
+记录。运行日志仍由 Core 的 bounded log ring 固定容量轮转。新事件保存完整 payload；
+旧 schema 未保存的 URL 等字段无法恢复，迁移行以 `legacy_fallback` 明确标记，并从
+迁移后的 `content.json` 恢复 source 配置。

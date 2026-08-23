@@ -24,6 +24,55 @@ def _legacy_data(workspace: Path) -> Path:
     return source
 
 
+def _published_v1_receipt(workspace: Path) -> tuple[Path, Path]:
+    source = _legacy_data(workspace)
+    target = workspace / "plugin-data" / "calendar-github"
+    target.mkdir(parents=True)
+    entries = []
+    for name in (
+        ".env",
+        ".gcp-saved-tokens.json",
+        "proactive_alerts.json",
+        "calendar_alerts.sqlite3",
+    ):
+        source_file = source / name
+        if not source_file.exists():
+            entries.append({"name": name, "status": "source_missing"})
+            continue
+        target_file = target / name
+        target_file.write_bytes(source_file.read_bytes())
+        entries.append(
+            {
+                "name": name,
+                "status": "copied",
+                "sha256": migration._digest(target_file),
+                "size": target_file.stat().st_size,
+                **(
+                    {"sqlite_integrity": "ok"}
+                    if target_file.suffix == ".sqlite3"
+                    else {}
+                ),
+            }
+        )
+    receipt = target / migration._RECEIPT
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "mcp/calendar-mcp",
+                "target": "plugin-data/calendar-github",
+                "recovery": {
+                    "kind": "retained_source",
+                    "path": "mcp/calendar-mcp",
+                },
+                "files": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return target, receipt
+
+
 def test_migration_preserves_source_and_publishes_verified_receipt(
     tmp_path: Path,
 ) -> None:
@@ -164,51 +213,7 @@ def test_migration_rejects_untrusted_existing_receipt(tmp_path: Path) -> None:
 
 def test_existing_v1_receipt_is_verified_then_upgraded_to_content(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    source = _legacy_data(workspace)
-    target = workspace / "plugin-data" / "calendar-github"
-    target.mkdir(parents=True)
-    entries = []
-    for name in (
-        ".env",
-        ".gcp-saved-tokens.json",
-        "proactive_alerts.json",
-        "calendar_alerts.sqlite3",
-    ):
-        source_file = source / name
-        if not source_file.exists():
-            entries.append({"name": name, "status": "source_missing"})
-            continue
-        target_file = target / name
-        target_file.write_bytes(source_file.read_bytes())
-        entries.append(
-            {
-                "name": name,
-                "status": "copied",
-                "sha256": migration._digest(target_file),
-                "size": target_file.stat().st_size,
-                **(
-                    {"sqlite_integrity": "ok"}
-                    if target_file.suffix == ".sqlite3"
-                    else {}
-                ),
-            }
-        )
-    receipt = target / migration._RECEIPT
-    receipt.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "source": "mcp/calendar-mcp",
-                "target": "plugin-data/calendar-github",
-                "recovery": {
-                    "kind": "retained_source",
-                    "path": "mcp/calendar-mcp",
-                },
-                "files": entries,
-            }
-        ),
-        encoding="utf-8",
-    )
+    target, receipt = _published_v1_receipt(workspace)
 
     assert migration.migrate_v2_data(
         workspace=workspace, marketplace="github"
@@ -218,6 +223,59 @@ def test_existing_v1_receipt_is_verified_then_upgraded_to_content(tmp_path: Path
     assert upgraded["files"][2]["name"] == "content.json"
     assert not (target / "proactive_alerts.json").exists()
     assert json.loads((target / "content.json").read_text(encoding="utf-8")) == {}
+
+
+def test_v1_upgrade_replays_after_config_replace_before_receipt_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    target, receipt = _published_v1_receipt(workspace)
+    original_replace = os.replace
+
+    def fail_receipt_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == receipt:
+            raise OSError("crash before receipt replace")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(migration.os, "replace", fail_receipt_replace)
+    with pytest.raises(OSError, match="before receipt"):
+        migration.migrate_v2_data(workspace=workspace, marketplace="github")
+    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert (target / "content.json").is_file()
+    assert (target / "proactive_alerts.json").is_file()
+
+    monkeypatch.setattr(migration.os, "replace", original_replace)
+    _ = migration.migrate_v2_data(workspace=workspace, marketplace="github")
+    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert not (target / "proactive_alerts.json").exists()
+
+
+def test_v1_upgrade_replays_after_receipt_replace_before_config_retire(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    target, receipt = _published_v1_receipt(workspace)
+    original_unlink = Path.unlink
+    failed = False
+
+    def fail_old_config_unlink(path: Path, *args, **kwargs) -> None:
+        nonlocal failed
+        if path.name == "proactive_alerts.json" and not failed:
+            failed = True
+            raise OSError("crash before config retire")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_old_config_unlink)
+    with pytest.raises(OSError, match="before config retire"):
+        migration.migrate_v2_data(workspace=workspace, marketplace="github")
+    assert json.loads(receipt.read_text(encoding="utf-8"))["schema_version"] == 2
+    assert (target / "proactive_alerts.json").is_file()
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    _ = migration.migrate_v2_data(workspace=workspace, marketplace="github")
+    assert not (target / "proactive_alerts.json").exists()
 
 
 def test_migration_receipt_rejects_missing_published_target(tmp_path: Path) -> None:
