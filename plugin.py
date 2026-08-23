@@ -55,6 +55,10 @@ class CalendarContentApiPort(Protocol):
     async def acknowledge(self, event_id: str) -> Mapping[str, object]: ...
 
 
+class CalendarContentApiError(RuntimeError):
+    """Represent a retryable failure at the private Calendar HTTP boundary."""
+
+
 class CalendarContentConfig(BaseModel):
     poll_interval_seconds: int = Field(default=300, ge=1)
 
@@ -118,8 +122,10 @@ class CalendarContentApi:
         try:
             with urlopen(request, timeout=30) as response:
                 result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError) as error:
-            raise RuntimeError(f"calendar Content API {path} failed: {error}") from error
+        except (HTTPError, URLError, TimeoutError) as error:
+            raise CalendarContentApiError(
+                f"calendar Content API {path} failed: {error}"
+            ) from error
         if not isinstance(result, dict):
             raise RuntimeError(f"calendar Content API {path} 返回非对象")
         return result
@@ -184,7 +190,7 @@ class CalendarSourceRuntime:
                 return
             try:
                 await self._tick()
-            except RuntimeError:
+            except CalendarContentApiError:
                 logger.exception("calendar Content tick failed; next timer will retry")
         finally:
             self._handle = None

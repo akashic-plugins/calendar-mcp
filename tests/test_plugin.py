@@ -26,6 +26,7 @@ from agent.plugins.static_manifest import load_static_plugin_manifest
 from plugin import (
     CONTENT_SOURCE,
     CalendarConfig,
+    CalendarContentApiError,
     CalendarContentConfig,
     CalendarSourceRuntime,
 )
@@ -77,9 +78,13 @@ class RecordingApi:
         self.commits: list[str] = []
         self.acks: list[str] = []
         self.ack_failures = 0
+        self.poll_failures = 0
 
     async def poll(self):
         self.polls += 1
+        if self.poll_failures:
+            self.poll_failures -= 1
+            raise CalendarContentApiError("recording Calendar poll failed")
         return self.batch
 
     async def commit(self, batch_id):
@@ -269,3 +274,43 @@ async def test_start_and_reload_own_exactly_one_real_timer() -> None:
     await runtime.close()
     assert runtime._handle is None
     assert runtime._task is None
+
+
+@pytest.mark.asyncio
+async def test_http_boundary_failure_is_logged_and_rearmed() -> None:
+    content = RecordingContent()
+    api = RecordingApi()
+    api.poll_failures = 1
+    runtime = CalendarSourceRuntime(
+        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
+    )
+
+    await runtime.start()
+    first_task = runtime._task
+    assert first_task is not None
+    await first_task
+
+    assert api.polls == 1
+    assert runtime._handle is not None
+    assert runtime._task is not None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_content_contract_error_remains_fail_loud_after_cleanup() -> None:
+    content = RecordingContent()
+    content.after_submit = RuntimeError("Content contract broken")
+    api = RecordingApi()
+    runtime = CalendarSourceRuntime(
+        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
+    )
+
+    await runtime.start()
+    first_task = runtime._task
+    assert first_task is not None
+    with pytest.raises(RuntimeError, match="Content contract broken"):
+        await first_task
+
+    assert api.commits == []
+    assert runtime._handle is not None
+    await runtime.close()
