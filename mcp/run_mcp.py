@@ -17,9 +17,7 @@ def _configure_environment() -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
     load_dotenv(data_dir / ".env", override=True)
     os.environ["TOKEN_FILE_PATH"] = str(data_dir / ".gcp-saved-tokens.json")
-    os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
-        data_dir / "proactive_alerts.json"
-    )
+    os.environ["CALENDAR_CONTENT_CONFIG_PATH"] = str(data_dir / "content.json")
     os.environ.setdefault("RELOAD", "false")
     os.environ["HOST"] = "127.0.0.1"
     os.chdir(script_dir)

@@ -1,5 +1,4 @@
 {
-  "enabled": true,
   "lookahead_hours": 6,
   "max_results_per_calendar": 20,
   "calendar_ids": [

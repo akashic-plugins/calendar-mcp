@@ -21,9 +21,7 @@ def _runtime_dir() -> Path:
 RUNTIME_DIR = _runtime_dir()
 load_dotenv(RUNTIME_DIR / ".env", override=True)
 os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
-os.environ["CALENDAR_PROACTIVE_CONFIG_PATH"] = str(
-    RUNTIME_DIR / "proactive_alerts.json"
-)
+os.environ["CALENDAR_CONTENT_CONFIG_PATH"] = str(RUNTIME_DIR / "content.json")
 os.environ.setdefault("RELOAD", "false")
 
 LOGGING_CONFIG = {
