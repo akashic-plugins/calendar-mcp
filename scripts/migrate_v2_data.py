@@ -21,12 +21,13 @@ from bootstrap.workspace_lock import WorkspaceInstanceLock
 
 
 _DATA_FILES = (
-    ".env",
-    ".gcp-saved-tokens.json",
-    "proactive_alerts.json",
-    "calendar_alerts.sqlite3",
+    (".env", ".env"),
+    (".gcp-saved-tokens.json", ".gcp-saved-tokens.json"),
+    ("proactive_alerts.json", "content.json"),
+    ("calendar_alerts.sqlite3", "calendar_alerts.sqlite3"),
 )
 _RECEIPT = ".calendar-v2-migration.json"
+_RECEIPT_SCHEMA = 2
 
 
 def _digest(path: Path) -> str:
@@ -63,21 +64,36 @@ def _stage_files(source: Path, staging: Path) -> tuple[dict[str, object], ...]:
     """复制全部现存 v2 文件并返回内容 receipt。"""
 
     entries: list[dict[str, object]] = []
-    for name in _DATA_FILES:
-        source_file = source / name
+    for source_name, target_name in _DATA_FILES:
+        source_file = source / source_name
         if not source_file.exists():
-            entries.append({"name": name, "status": "source_missing"})
+            entries.append(
+                {
+                    "source_name": source_name,
+                    "name": target_name,
+                    "status": "source_missing",
+                }
+            )
             continue
         if source_file.is_symlink() or not source_file.is_file():
             raise ValueError(f"Calendar v2 数据不是普通文件: {source_file}")
-        staged_file = staging / name
+        staged_file = staging / target_name
         integrity = None
         if source_file.suffix == ".sqlite3":
             integrity = _copy_sqlite(source_file, staged_file)
         else:
-            shutil.copy2(source_file, staged_file)
+            if source_name == "proactive_alerts.json":
+                value = json.loads(source_file.read_text(encoding="utf-8"))
+                value.pop("enabled", None)
+                staged_file.write_text(
+                    json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                shutil.copy2(source_file, staged_file)
         entry: dict[str, object] = {
-            "name": name,
+            "source_name": source_name,
+            "name": target_name,
             "status": "staged",
             "sha256": _digest(staged_file),
             "size": staged_file.stat().st_size,
@@ -176,14 +192,14 @@ def _has_valid_receipt(path: Path, *, target: Path, marketplace: str) -> bool:
     files = value.get("files") if isinstance(value, dict) else None
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != 1
+        or value.get("schema_version") != _RECEIPT_SCHEMA
         or value.get("source") != "mcp/calendar-mcp"
         or value.get("target") != expected_target
         or value.get("recovery")
         != {"kind": "retained_source", "path": "mcp/calendar-mcp"}
         or not isinstance(files, list)
         or [item.get("name") for item in files if isinstance(item, dict)]
-        != list(_DATA_FILES)
+        != [target_name for _source_name, target_name in _DATA_FILES]
     ):
         raise ValueError(f"Calendar migration receipt 无效: {path}")
     for item in files:
@@ -219,6 +235,76 @@ def _has_valid_receipt(path: Path, *, target: Path, marketplace: str) -> bool:
     return True
 
 
+def _upgrade_v1_receipt(path: Path, *, target: Path, marketplace: str) -> None:
+    """Convert a verified v3 proactive config receipt into the Content config receipt."""
+
+    if not path.is_file() or path.is_symlink():
+        return
+    value = json.loads(path.read_text(encoding="utf-8"))
+    files = value.get("files") if isinstance(value, dict) else None
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return
+    if (
+        value.get("source") != "mcp/calendar-mcp"
+        or value.get("target") != f"plugin-data/calendar-{marketplace}"
+        or not isinstance(files, list)
+        or [item.get("name") for item in files if isinstance(item, dict)]
+        != [
+            ".env",
+            ".gcp-saved-tokens.json",
+            "proactive_alerts.json",
+            "calendar_alerts.sqlite3",
+        ]
+    ):
+        raise ValueError(f"Calendar v1 migration receipt 无效: {path}")
+
+    # 1. Verify every previously published fact before translating the config.
+    for item in files:
+        if not isinstance(item, dict) or item.get("status") == "source_missing":
+            continue
+        old_target = target / str(item["name"])
+        if (
+            not old_target.is_file()
+            or old_target.is_symlink()
+            or old_target.stat().st_size != item.get("size")
+            or _digest(old_target) != item.get("sha256")
+        ):
+            raise ValueError(f"Calendar v1 migration target 漂移: {old_target}")
+
+    # 2. Publish content.json, then atomically replace the receipt.
+    old_config = target / "proactive_alerts.json"
+    new_config = target / "content.json"
+    config_item = files[2]
+    if config_item["status"] != "source_missing":
+        config = json.loads(old_config.read_text(encoding="utf-8"))
+        config.pop("enabled", None)
+        payload = (
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        )
+        if new_config.exists() and new_config.read_text(encoding="utf-8") != payload:
+            raise FileExistsError(f"Calendar Content config 已存在且内容不同: {new_config}")
+        if not new_config.exists():
+            new_config.write_text(payload, encoding="utf-8")
+        config_item.update(
+            source_name="proactive_alerts.json",
+            name="content.json",
+            sha256=_digest(new_config),
+            size=new_config.stat().st_size,
+        )
+    else:
+        config_item.update(source_name="proactive_alerts.json", name="content.json")
+    value["schema_version"] = _RECEIPT_SCHEMA
+    staged_receipt = target / f"{_RECEIPT}.content-v1"
+    staged_receipt.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(staged_receipt, path)
+
+    # 3. The retained v2 source is recovery; the old plugin-data config is obsolete.
+    old_config.unlink(missing_ok=True)
+
+
 def migrate_v2_data(*, workspace: Path, marketplace: str) -> Path:
     """持有 workspace 独占锁迁移 Calendar 数据并写最终 receipt。"""
 
@@ -249,6 +335,7 @@ def _migrate_locked(*, workspace: Path, marketplace: str) -> Path:
     validate_workspace_plugin_data_path(target, workspace)
     _remove_stale_staging(workspace)
     receipt_path = target / _RECEIPT
+    _upgrade_v1_receipt(receipt_path, target=target, marketplace=marketplace)
     if _has_valid_receipt(receipt_path, target=target, marketplace=marketplace):
         return receipt_path
 
@@ -260,7 +347,7 @@ def _migrate_locked(*, workspace: Path, marketplace: str) -> Path:
         ensure_workspace_plugin_data_dir(target, workspace)
         _validate_targets(target, entries)
         receipt: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": _RECEIPT_SCHEMA,
             "source": "mcp/calendar-mcp",
             "target": f"plugin-data/calendar-{marketplace}",
             "recovery": {

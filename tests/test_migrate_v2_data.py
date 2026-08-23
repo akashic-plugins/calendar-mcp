@@ -37,7 +37,7 @@ def test_migration_preserves_source_and_publishes_verified_receipt(
 
     target = workspace / "plugin-data" / "calendar-github"
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == 1
+    assert receipt["schema_version"] == 2
     assert receipt["recovery"] == {
         "kind": "retained_source",
         "path": "mcp/calendar-mcp",
@@ -45,7 +45,7 @@ def test_migration_preserves_source_and_publishes_verified_receipt(
     assert [item["name"] for item in receipt["files"]] == [
         ".env",
         ".gcp-saved-tokens.json",
-        "proactive_alerts.json",
+        "content.json",
         "calendar_alerts.sqlite3",
     ]
     assert [item["status"] for item in receipt["files"]] == [
@@ -57,6 +57,7 @@ def test_migration_preserves_source_and_publishes_verified_receipt(
     assert receipt["files"][-1]["sqlite_integrity"] == "ok"
     assert (source / ".env").read_text(encoding="utf-8") == "GOOGLE_CLIENT_ID=kept\n"
     assert (target / ".env").read_text(encoding="utf-8") == "GOOGLE_CLIENT_ID=kept\n"
+    assert json.loads((target / "content.json").read_text(encoding="utf-8")) == {}
     with sqlite3.connect(target / "calendar_alerts.sqlite3") as database:
         assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert database.execute("SELECT value FROM receipts").fetchone() == ("kept",)
@@ -126,14 +127,14 @@ def test_migration_recovers_matching_partial_publish_after_process_crash(
 
     assert receipt.is_file()
     assert not stale.exists()
-    assert (target / "proactive_alerts.json").is_file()
+    assert (target / "content.json").is_file()
     assert (target / "calendar_alerts.sqlite3").is_file()
     statuses = {
         item["name"]: item["status"]
         for item in json.loads(receipt.read_text(encoding="utf-8"))["files"]
     }
     assert statuses[".env"] == "target_verified"
-    assert statuses["proactive_alerts.json"] == "copied"
+    assert statuses["content.json"] == "copied"
 
 
 def test_migration_requires_idle_workspace(tmp_path: Path) -> None:
@@ -159,6 +160,64 @@ def test_migration_rejects_untrusted_existing_receipt(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="receipt 无效"):
         migration.migrate_v2_data(workspace=workspace, marketplace="github")
+
+
+def test_existing_v1_receipt_is_verified_then_upgraded_to_content(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source = _legacy_data(workspace)
+    target = workspace / "plugin-data" / "calendar-github"
+    target.mkdir(parents=True)
+    entries = []
+    for name in (
+        ".env",
+        ".gcp-saved-tokens.json",
+        "proactive_alerts.json",
+        "calendar_alerts.sqlite3",
+    ):
+        source_file = source / name
+        if not source_file.exists():
+            entries.append({"name": name, "status": "source_missing"})
+            continue
+        target_file = target / name
+        target_file.write_bytes(source_file.read_bytes())
+        entries.append(
+            {
+                "name": name,
+                "status": "copied",
+                "sha256": migration._digest(target_file),
+                "size": target_file.stat().st_size,
+                **(
+                    {"sqlite_integrity": "ok"}
+                    if target_file.suffix == ".sqlite3"
+                    else {}
+                ),
+            }
+        )
+    receipt = target / migration._RECEIPT
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source": "mcp/calendar-mcp",
+                "target": "plugin-data/calendar-github",
+                "recovery": {
+                    "kind": "retained_source",
+                    "path": "mcp/calendar-mcp",
+                },
+                "files": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert migration.migrate_v2_data(
+        workspace=workspace, marketplace="github"
+    ) == receipt
+    upgraded = json.loads(receipt.read_text(encoding="utf-8"))
+    assert upgraded["schema_version"] == 2
+    assert upgraded["files"][2]["name"] == "content.json"
+    assert not (target / "proactive_alerts.json").exists()
+    assert json.loads((target / "content.json").read_text(encoding="utf-8")) == {}
 
 
 def test_migration_receipt_rejects_missing_published_target(tmp_path: Path) -> None:
