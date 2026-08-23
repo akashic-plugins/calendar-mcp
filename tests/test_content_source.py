@@ -115,6 +115,83 @@ def test_legacy_schema_migrates_with_recovery_copy_and_exact_v1(tmp_path) -> Non
         assert "url" not in payload
 
 
+def test_malformed_fallback_config_leaves_legacy_db_atomic_and_replays(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "calendar_alerts.sqlite3"
+    config_path = tmp_path / "content.json"
+    config_path.write_text("{broken", encoding="utf-8")
+    monkeypatch.setenv("CALENDAR_CONTENT_CONFIG_PATH", str(config_path))
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+            CREATE TABLE acknowledged_alerts(
+                event_id TEXT PRIMARY KEY, raw_event_id TEXT NOT NULL,
+                calendar_id TEXT NOT NULL, starts_at TEXT, title TEXT,
+                content TEXT, acked_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            );
+            CREATE TABLE pending_alerts(
+                event_id TEXT PRIMARY KEY, raw_event_id TEXT NOT NULL,
+                calendar_id TEXT NOT NULL, starts_at TEXT, title TEXT,
+                content TEXT, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            );
+            INSERT INTO pending_alerts VALUES(
+                'pending-legacy', 'pending-raw', 'primary',
+                '2026-08-23T11:00:00+00:00', 'pending title', 'pending content',
+                '2026-08-23T10:00:00+00:00', '2026-08-25T10:00:00+00:00'
+            );
+            INSERT INTO acknowledged_alerts VALUES(
+                'acked-legacy', 'acked-raw', 'primary',
+                '2026-08-22T11:00:00+00:00', 'acked title', 'acked content',
+                '2026-08-22T12:00:00+00:00', '2026-08-29T12:00:00+00:00'
+            );
+            """)
+
+    store = CalendarContentStore(path)
+    with pytest.raises(json.JSONDecodeError):
+        store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert tables == {"acknowledged_alerts", "pending_alerts"}
+        assert connection.execute("PRAGMA user_version").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT event_id FROM pending_alerts"
+        ).fetchall() == [("pending-legacy",)]
+        assert connection.execute(
+            "SELECT event_id FROM acknowledged_alerts"
+        ).fetchall() == [("acked-legacy",)]
+
+    config_path.write_text(
+        json.dumps(
+            {
+                "source_name": "restored-calendar",
+                "source_type": "restored-alert",
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.initialize()
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT event_id FROM acknowledged_alerts"
+        ).fetchall() == [("acked-legacy",)]
+        pending = connection.execute(
+            "SELECT event_id, payload_origin, payload_json FROM pending_alerts"
+        ).fetchone()
+        assert pending[:2] == ("pending-legacy", "legacy_fallback")
+        payload = json.loads(pending[2])
+        assert payload["source_name"] == "restored-calendar"
+        assert payload["source_type"] == "restored-alert"
+
+
 def test_same_version_malformed_schema_is_rejected(tmp_path) -> None:
     path = tmp_path / "calendar_alerts.sqlite3"
     with sqlite3.connect(path) as connection:

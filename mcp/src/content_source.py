@@ -242,6 +242,7 @@ class CalendarContentStore:
             return {"acknowledged": True, "duplicate": False}
 
     def _migrate_v0(self) -> None:
+        fallback_config = load_config()
         with self._transaction() as connection:
             tables = {
                 row[0]
@@ -259,8 +260,7 @@ class CalendarContentStore:
                 connection.execute(
                     "ALTER TABLE pending_alerts RENAME TO legacy_pending_alerts"
                 )
-            connection.executescript(_V1_SCHEMA)
-            fallback_config = load_config()
+            _create_v1_schema(connection)
             for row in acknowledged:
                 connection.execute(
                     """
@@ -317,7 +317,7 @@ class CalendarContentStore:
                 )
             }
         with sqlite3.connect(":memory:") as expected_connection:
-            expected_connection.executescript(_V1_SCHEMA)
+            _create_v1_schema(expected_connection)
             expected = {
                 (row[0], row[1]): _normalize_sql(row[2])
                 for row in expected_connection.execute(
@@ -548,8 +548,8 @@ def _normalize_sql(value: str) -> str:
     return " ".join(value.lower().split())
 
 
-_V1_SCHEMA = """
-CREATE TABLE acknowledged_alerts(
+_V1_SCHEMA_STATEMENTS = (
+    """CREATE TABLE acknowledged_alerts(
     event_id TEXT PRIMARY KEY,
     raw_event_id TEXT NOT NULL,
     calendar_id TEXT NOT NULL,
@@ -558,8 +558,8 @@ CREATE TABLE acknowledged_alerts(
     content TEXT,
     acked_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
-);
-CREATE TABLE pending_alerts(
+)""",
+    """CREATE TABLE pending_alerts(
     event_id TEXT PRIMARY KEY,
     raw_event_id TEXT NOT NULL,
     calendar_id TEXT NOT NULL,
@@ -572,13 +572,13 @@ CREATE TABLE pending_alerts(
     submitted_batch_id TEXT,
     payload_json TEXT NOT NULL,
     payload_origin TEXT NOT NULL CHECK(payload_origin IN ('full', 'legacy_fallback'))
-);
-CREATE TABLE source_state(
+)""",
+    """CREATE TABLE source_state(
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     cursor INTEGER NOT NULL
-);
-INSERT OR IGNORE INTO source_state(singleton, cursor) VALUES(1, 0);
-CREATE TABLE poll_batches(
+)""",
+    "INSERT INTO source_state(singleton, cursor) VALUES(1, 0)",
+    """CREATE TABLE poll_batches(
     batch_id TEXT PRIMARY KEY,
     cursor INTEGER NOT NULL,
     next_cursor INTEGER NOT NULL,
@@ -586,9 +586,16 @@ CREATE TABLE poll_batches(
     status TEXT NOT NULL CHECK(status IN ('pending', 'committed')),
     created_at TEXT NOT NULL,
     committed_at TEXT
-);
-CREATE UNIQUE INDEX one_pending_calendar_batch
-ON poll_batches(status) WHERE status = 'pending';
-CREATE INDEX pending_calendar_submission
-ON pending_alerts(submitted_batch_id, event_id);
-"""
+)""",
+    """CREATE UNIQUE INDEX one_pending_calendar_batch
+ON poll_batches(status) WHERE status = 'pending'""",
+    """CREATE INDEX pending_calendar_submission
+ON pending_alerts(submitted_batch_id, event_id)""",
+)
+
+
+def _create_v1_schema(connection: sqlite3.Connection) -> None:
+    """Create the exact v1 schema inside the caller-owned transaction."""
+
+    for statement in _V1_SCHEMA_STATEMENTS:
+        connection.execute(statement)
