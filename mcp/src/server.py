@@ -24,6 +24,11 @@ from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from src.content_source import (
+    acknowledge_content,
+    commit_content_batch,
+    poll_content,
+)
 
 # Import functions and models directly using absolute imports
 try:
@@ -246,6 +251,35 @@ def health_check():
     """Basic health check endpoint."""
     auth_status = "authenticated" if global_credentials and global_credentials.valid else "authentication_failed_or_pending"
     return {"status": "ok", "authentication": auth_status}
+
+
+class ContentCommitRequest(BaseModel):
+    batch_id: str
+
+
+class ContentAckRequest(BaseModel):
+    event_id: str
+
+
+@app.post("/content/poll", tags=["Content"], operation_id="poll_content")
+def poll_content_endpoint():
+    """Freeze or replay the current Calendar Content batch."""
+
+    return poll_content()
+
+
+@app.post("/content/commit", tags=["Content"], operation_id="commit_content")
+def commit_content_endpoint(request: ContentCommitRequest):
+    """Advance the Calendar cursor after Core accepted the batch."""
+
+    return commit_content_batch(request.batch_id)
+
+
+@app.post("/content/ack", tags=["Content"], operation_id="ack_content")
+def acknowledge_content_endpoint(request: ContentAckRequest):
+    """Acknowledge one delivered Calendar event idempotently."""
+
+    return acknowledge_content(request.event_id)
 
 # --- CalendarList Endpoints ---
 @app.get(
