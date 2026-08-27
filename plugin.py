@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -23,32 +23,17 @@ from agent.plugin_composition import (
     ManagedProcessDefinition,
     McpServerDefinition,
     PluginTimers,
-    ServiceKey,
 )
+from plugins.wake.contracts import WAKE_ALERT_SOURCE, WakeAlertSource
 
 
 logger = logging.getLogger(__name__)
 
 
-class BoundContentSource(Protocol):
-    def submit(
-        self, batch_id: str, items: Sequence[Mapping[str, object]]
-    ) -> Mapping[str, object]: ...
-
-    def unsettled(self, limit: int = 100) -> tuple[Mapping[str, object], ...]: ...
-
-    def ack(self, settlement_ref: str) -> Mapping[str, object]: ...
-
-
-class ContentSourceServices(Protocol):
-    def bind(self, source_id: str) -> BoundContentSource: ...
-
-
-CONTENT_SOURCE = ServiceKey[ContentSourceServices]("content.source.v1")
-
-
 class CalendarContentApiPort(Protocol):
     async def poll(self) -> Mapping[str, object]: ...
+
+    async def pending(self) -> tuple[Mapping[str, object], ...]: ...
 
     async def commit(self, batch_id: str) -> Mapping[str, object]: ...
 
@@ -84,10 +69,10 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.1.0"
-desc = "Google Calendar MCP and durable Content source plugin"
+version = "3.2.0"
+desc = "Google Calendar MCP and durable Alert source plugin"
 Config = CalendarConfig
-inject = (MANAGED_PROCESSES, MCP_SERVERS, TIMERS, CONTENT_SOURCE)
+inject = (MANAGED_PROCESSES, MCP_SERVERS, TIMERS, WAKE_ALERT_SOURCE)
 
 
 class CalendarContentApi:
@@ -98,6 +83,17 @@ class CalendarContentApi:
 
     async def poll(self) -> Mapping[str, object]:
         return await asyncio.to_thread(self._request, "POST", "/content/poll", None)
+
+    async def pending(self) -> tuple[Mapping[str, object], ...]:
+        result = await asyncio.to_thread(
+            self._request, "POST", "/content/pending", None
+        )
+        items = result.get("items")
+        if not isinstance(items, list) or any(
+            not isinstance(item, Mapping) for item in items
+        ):
+            raise RuntimeError("calendar pending items 不是对象列表")
+        return tuple(cast(list[Mapping[str, object]], items))
 
     async def commit(self, batch_id: str) -> Mapping[str, object]:
         return await asyncio.to_thread(
@@ -132,17 +128,17 @@ class CalendarContentApi:
 
 
 class CalendarSourceRuntime:
-    """Compose Content settlement, frozen Calendar batches, and one-shot timers."""
+    """Report frozen Calendar Alert batches and own one-shot timers."""
 
     def __init__(
         self,
         timers: PluginTimers,
-        content: BoundContentSource,
+        alerts: WakeAlertSource,
         api: CalendarContentApiPort,
         interval: timedelta,
     ) -> None:
         self._timers = timers
-        self._content = content
+        self._alerts = alerts
         self._api = api
         self._interval = interval
         self._handle: TimerHandle | None = None
@@ -153,11 +149,9 @@ class CalendarSourceRuntime:
         """Spawn exactly one Fiber-owned formal-runtime poll loop."""
 
         if self._closed:
-            raise RuntimeError("calendar Content runtime 已关闭")
+            raise RuntimeError("calendar Alert runtime 已关闭")
         if self._task is None:
-            self._task = await ctx.spawn(
-                self._run(), name="calendar-content-poll"
-            )
+            self._task = await ctx.spawn(self._run(), name="calendar-alert-poll")
 
     async def close(self) -> None:
         """Cancel the owned timer/task without changing durable progress."""
@@ -197,17 +191,18 @@ class CalendarSourceRuntime:
             deadline = datetime.now(UTC) + self._interval
 
     async def _tick(self) -> None:
-        """Settle delivered items, then submit and commit one stable poll batch."""
+        """Report current alerts, ACK terminal identities, and commit the source batch."""
 
-        # 1. Provider acknowledgement precedes Content acknowledgement.
-        for unsettled in self._content.unsettled():
-            ref = unsettled["ref"]
-            if not isinstance(ref, Mapping):
-                raise RuntimeError("calendar Content unsettled ref 不是对象")
-            await self._api.acknowledge(str(ref["item_id"]))
-            _ = self._content.ack(str(unsettled["settlement_ref"]))
+        # 1. Submitted Calendar rows remain queryable until Wake reaches a terminal state.
+        for item in await self._api.pending():
+            event_id, payload, _expires_at = _alert_item(item)
+            if self._alerts.status(source_id="calendar", event_id=event_id) in {
+                "delivered",
+                "skipped",
+            }:
+                _ = await self._api.acknowledge(event_id)
 
-        # 2. Calendar freezes a batch; Core deduplicates replay by batch and revision.
+        # 2. Freeze one new batch and report each stable Alert identity.
         batch = await self._api.poll()
         status = batch.get("status")
         if status == "no_batch":
@@ -217,15 +212,26 @@ class CalendarSourceRuntime:
         batch_id = str(batch["batch_id"])
         items = batch["items"]
         if not isinstance(items, list):
-            raise RuntimeError("calendar Content batch items 不是列表")
-        _ = self._content.submit(batch_id, items)
+            raise RuntimeError("calendar Alert batch items 不是列表")
+        now = datetime.now(UTC)
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise RuntimeError("calendar Alert batch item 不是对象")
+            event_id, payload, expires_at = _alert_item(item)
+            _ = self._alerts.report(
+                source_id="calendar",
+                event_id=event_id,
+                payload=payload,
+                observed_at=now,
+                expires_at=expires_at,
+            )
 
-        # 3. Advance the Calendar cursor only after Content accepted the batch.
+        # 3. Advance only after Wake accepted every Alert report.
         _ = await self._api.commit(batch_id)
 
 
 async def apply(ctx: Context, config: object) -> None:
-    """Register Calendar capabilities and bind one formal-only Content runtime."""
+    """Register Calendar capabilities and bind one formal-only Alert runtime."""
 
     if not isinstance(config, CalendarConfig):
         raise TypeError("calendar config 必须是 CalendarConfig")
@@ -247,10 +253,10 @@ async def apply(ctx: Context, config: object) -> None:
         ),
     )
 
-    # 2. The ordinary Content source owns its lifecycle through existing hooks.
+    # 2. The Alert source owns its lifecycle through existing hooks.
     runtime = CalendarSourceRuntime(
         ctx.require(TIMERS),
-        ctx.require(CONTENT_SOURCE).bind("calendar"),
+        ctx.require(WAKE_ALERT_SOURCE),
         CalendarContentApi(CALENDAR_PROCESS.formal_port),
         timedelta(seconds=config.content.poll_interval_seconds),
     )
@@ -258,6 +264,27 @@ async def apply(ctx: Context, config: object) -> None:
     def setup() -> object:
         return runtime.close
 
-    _ = await ctx.effect(setup, label="calendar-content-runtime")
+    _ = await ctx.effect(setup, label="calendar-alert-runtime")
     _ = await ctx.on(RUNTIME_STARTED, lambda _event: runtime.start(ctx))
     _ = await ctx.on(RUNTIME_STOPPING, lambda _event: runtime.close())
+
+
+def _alert_item(
+    item: Mapping[str, object],
+) -> tuple[str, Mapping[str, object], datetime | None]:
+    event_id = item.get("item_id")
+    payload = item.get("payload")
+    if not isinstance(event_id, str) or not event_id:
+        raise RuntimeError("calendar Alert item_id 必须是非空字符串")
+    if not isinstance(payload, Mapping):
+        raise RuntimeError("calendar Alert payload 必须是对象")
+    raw_expiry = item.get("expires_at")
+    if raw_expiry is None:
+        expires_at = None
+    elif isinstance(raw_expiry, str):
+        expires_at = datetime.fromisoformat(raw_expiry)
+        if expires_at.tzinfo is None:
+            raise RuntimeError("calendar Alert expires_at 必须带时区")
+    else:
+        raise RuntimeError("calendar Alert expires_at 必须是 ISO 时间")
+    return event_id, cast(Mapping[str, object], payload), expires_at

@@ -7,7 +7,13 @@ from typing import cast
 
 import pytest
 
-from src.content_source import CalendarContentStore
+from src.content_source import (
+    CalendarContentConfig,
+    CalendarContentStore,
+    _to_event,
+    acknowledge_content,
+    pending_content,
+)
 
 
 NOW = datetime(2026, 8, 23, 10, tzinfo=UTC)
@@ -69,6 +75,26 @@ def test_provider_ack_is_idempotent_and_preserves_legacy_fact_tables(tmp_path) -
         assert connection.execute(
             "SELECT count(*) FROM acknowledged_alerts"
         ).fetchone() == (1,)
+
+
+def test_pending_endpoint_roundtrip_survives_commit_until_terminal_ack(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "content.json"
+    config_path.write_text(
+        json.dumps({"db_path": "calendar_alerts.sqlite3"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CALENDAR_CONTENT_CONFIG_PATH", str(config_path))
+    store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
+    store.initialize()
+    batch = store.freeze([_event("event-1")], NOW)
+    assert batch is not None
+    _ = store.commit(str(batch["batch_id"]), NOW)
+
+    assert [item["item_id"] for item in pending_content()["items"]] == ["event-1"]
+    assert acknowledge_content("event-1")["acknowledged"] is True
+    assert pending_content() == {"items": []}
 
 
 def test_legacy_schema_migrates_with_recovery_copy_and_exact_v1(tmp_path) -> None:
@@ -260,3 +286,65 @@ def test_repoll_of_submitted_revision_is_a_database_no_op(tmp_path) -> None:
             "FROM source_state"
         ).fetchone()
     assert after == before
+
+
+def test_revised_event_reuses_identity_and_replaces_pending_payload(tmp_path) -> None:
+    store = CalendarContentStore(tmp_path / "calendar_alerts.sqlite3")
+    store.initialize()
+    first = store.freeze([_event("event-1")], NOW)
+    assert first is not None
+    _ = store.commit(str(first["batch_id"]), NOW)
+
+    revised = _event("event-1", "rev-2")
+    revised["title"] = "revised title"
+    revised["content"] = "revised content"
+    second = store.freeze([revised], NOW + timedelta(minutes=1))
+
+    assert second is not None
+    items = cast(list[dict[str, object]], second["items"])
+    assert len(items) == 1
+    assert items[0]["item_id"] == "event-1"
+    assert items[0]["revision"] == "rev-2"
+    assert cast(dict[str, object], items[0]["payload"])["title"] == "revised title"
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT count(*) FROM pending_alerts").fetchone() == (1,)
+
+
+def test_google_revision_and_start_changes_keep_one_alert_identity(tmp_path) -> None:
+    config = CalendarContentConfig(
+        lookahead_hours=6,
+        max_results_per_calendar=20,
+        calendar_ids=("primary",),
+        calendar_labels={"primary": "calendar"},
+        db_path=tmp_path / "calendar_alerts.sqlite3",
+        source_name="calendar",
+        source_type="calendar_alert",
+        default_severity="high",
+    )
+    first = _to_event(
+        {
+            "id": "google-event-1",
+            "summary": "First title",
+            "updated": "2026-08-23T10:00:00Z",
+            "start": {"dateTime": "2026-08-23T11:00:00Z"},
+        },
+        "primary",
+        "calendar",
+        config,
+    )
+    revised = _to_event(
+        {
+            "id": "google-event-1",
+            "summary": "Revised title",
+            "updated": "2026-08-23T10:05:00Z",
+            "start": {"dateTime": "2026-08-23T11:30:00Z"},
+        },
+        "primary",
+        "calendar",
+        config,
+    )
+
+    assert first is not None and revised is not None
+    assert first["event_id"] == revised["event_id"]
+    assert first["revision"] != revised["revision"]
+    assert first["content"] != revised["content"]

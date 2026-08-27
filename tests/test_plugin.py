@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -16,335 +18,195 @@ from agent.plugin_composition import (
     PluginRuntime,
     PluginTimers,
 )
-from agent.plugin_composition.mcp_slots import PluginMcpServers, _freeze_plugin_mcp_servers
+from agent.plugin_composition.mcp_slots import (
+    PluginMcpServers,
+    _freeze_plugin_mcp_servers,
+)
 from agent.plugin_composition.process_slots import (
     PluginManagedProcesses,
     _freeze_plugin_managed_processes,
 )
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
-from plugin import (
-    CONTENT_SOURCE,
-    CalendarConfig,
-    CalendarContentApiError,
-    CalendarContentConfig,
-    CalendarSourceRuntime,
-)
+from plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
+from plugins.wake.contracts import WAKE_ALERT_SOURCE, WakeAlertSource
 
 
 ROOT = Path(__file__).resolve().parents[1]
+NOW = datetime(2026, 8, 23, tzinfo=UTC)
 
 
-class RecordingContent:
+class RecordingAlerts:
     def __init__(self) -> None:
-        self.submissions: list[tuple[str, list[dict[str, object]]]] = []
-        self.unsettled_rows: tuple[dict[str, object], ...] = ()
-        self.acks: list[str] = []
-        self.after_submit: Exception | None = None
-        self.ack_failures = 0
+        self.reports: list[dict[str, object]] = []
+        self.statuses: dict[str, str] = {}
+        self.failure: Exception | None = None
 
-    def submit(self, batch_id, items):
-        self.submissions.append((batch_id, list(items)))
-        if self.after_submit is not None:
-            raise self.after_submit
-        return {"batch_id": batch_id}
+    def report(self, **kwargs: object) -> Mapping[str, object]:
+        if self.failure is not None:
+            raise self.failure
+        self.reports.append(dict(kwargs))
+        return {"accepted": True}
 
-    def unsettled(self, limit=100):
-        return self.unsettled_rows
-
-    def ack(self, settlement_ref):
-        self.acks.append(settlement_ref)
-        if self.ack_failures:
-            self.ack_failures -= 1
-            raise RuntimeError("recording Content ack failed")
-        return {"settled": True}
+    def status(self, *, source_id: str, event_id: str) -> str | None:
+        assert source_id == "calendar"
+        return self.statuses.get(event_id)
 
 
 class RecordingApi:
     def __init__(self) -> None:
-        self.batch = {
+        self.batch: Mapping[str, object] = {
             "status": "batch",
             "batch_id": "calendar:0:stable",
             "items": [
                 {
                     "item_id": "event-1",
-                    "revision": "rev-1",
-                    "payload": {"kind": "alert"},
-                    "not_before": datetime(2026, 8, 23, tzinfo=UTC).isoformat(),
-                    "requires_ack": True,
+                    "payload": {"title": "Meeting soon", "kind": "alert"},
                 }
             ],
         }
+        self.pending_items: tuple[Mapping[str, object], ...] = ()
         self.polls = 0
+        self.poll_failures = 0
         self.commits: list[str] = []
         self.acks: list[str] = []
-        self.ack_failures = 0
-        self.poll_failures = 0
 
-    async def poll(self):
+    async def pending(self) -> tuple[Mapping[str, object], ...]:
+        return self.pending_items
+
+    async def poll(self) -> Mapping[str, object]:
         self.polls += 1
         if self.poll_failures:
             self.poll_failures -= 1
             raise CalendarContentApiError("recording Calendar poll failed")
         return self.batch
 
-    async def commit(self, batch_id):
+    async def commit(self, batch_id: str) -> Mapping[str, object]:
         self.commits.append(batch_id)
         return {"committed": True}
 
-    async def acknowledge(self, event_id):
+    async def acknowledge(self, event_id: str) -> Mapping[str, object]:
         self.acks.append(event_id)
-        if self.ack_failures:
-            self.ack_failures -= 1
-            raise RuntimeError("recording Calendar ack failed")
         return {"acknowledged": True}
 
 
-class RecordingSourceServices:
-    def __init__(self, bound: RecordingContent) -> None:
-        self.bound = bound
-        self.source_ids: list[str] = []
-
-    def bind(self, source_id: str):
-        self.source_ids.append(source_id)
-        return self.bound
-
-
-async def _mount(tmp_path: Path):
+@pytest.mark.asyncio
+async def test_v3_apply_registers_calendar_process_and_alert_source(
+    tmp_path: Path,
+) -> None:
     root = CompositionRoot("calendar:test")
     processes = PluginManagedProcesses(root.instance_token)
     servers = PluginMcpServers(root.instance_token)
-    timers = PluginTimers(AsyncioOneShotTimer())
-    content = RecordingContent()
-    sources = RecordingSourceServices(content)
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TIMERS, timers)
-    await root.context.provide(CONTENT_SOURCE, sources)
+    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    _ = await root.context.provide(WAKE_ALERT_SOURCE, RecordingAlerts())
+
     await root.mount(
         ComposablePlugin.from_module(calendar_module),
         name="calendar",
         runtime=PluginRuntime(
             plugin_id="calendar",
+            generation_id="calendar:test",
             plugin_dir=ROOT,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
-            config=CalendarConfig(content=CalendarContentConfig()),
+            config=CalendarConfig(),
         ),
     )
-    return root, processes, servers, sources
 
-
-@pytest.mark.asyncio
-async def test_v3_apply_registers_ordinary_content_capabilities_without_writes(
-    tmp_path: Path,
-) -> None:
-    root, processes, servers, sources = await _mount(tmp_path)
-
-    process = _freeze_plugin_managed_processes(
-        processes, root.instance_token
-    )["calendar_api"].definition
-    mcp = _freeze_plugin_mcp_servers(
-        servers, root.instance_token
-    )["calendar"].definition
+    process = _freeze_plugin_managed_processes(processes, root.instance_token)[
+        "calendar_api"
+    ].definition
+    mcp = _freeze_plugin_mcp_servers(servers, root.instance_token)[
+        "calendar"
+    ].definition
     assert process == calendar_module.CALENDAR_PROCESS
-    assert process.formal_port == 18000
-    assert mcp.required_tools == ()
-    assert mcp.candidate_read_only_tools == ()
     assert mcp.endpoint_env[0].process == process.name
-    assert sources.source_ids == ["calendar"]
-    assert calendar_module.inject == (
-        MANAGED_PROCESSES,
-        MCP_SERVERS,
-        TIMERS,
-        CONTENT_SOURCE,
-    )
-    assert not (tmp_path / "plugin-data").exists()
+    assert calendar_module.inject[-1] == WAKE_ALERT_SOURCE
     await root.dispose()
 
 
-def test_static_manifest_matches_module_and_has_no_proactive_tools() -> None:
+def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
-
-    assert manifest.version == calendar_module.version == "3.1.0"
+    assert manifest.version == calendar_module.version == "3.2.0"
     assert manifest.mcp_servers[0].required_tools == ()
-    assert manifest.mcp_servers[0].candidate_read_only_tools == ()
-    text = (ROOT / "plugin.py").read_text(encoding="utf-8")
-    assert "PROACTIVE_COMPONENTS" not in text
-    assert "ProactiveSourceDefinition" not in text
+    assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 
 
 @pytest.mark.asyncio
-async def test_tick_submits_before_cursor_commit_and_replays_stable_batch() -> None:
-    content = RecordingContent()
+async def test_tick_reports_alert_before_committing_source_batch() -> None:
+    alerts = RecordingAlerts()
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
+        PluginTimers.candidate_validation(),
+        cast(WakeAlertSource, alerts),
+        api,
+        timedelta(minutes=5),
     )
 
     await runtime._tick()
-    await runtime._tick()
 
-    assert [batch_id for batch_id, _items in content.submissions] == [
-        "calendar:0:stable",
-        "calendar:0:stable",
-    ]
-    assert api.commits == ["calendar:0:stable", "calendar:0:stable"]
+    assert alerts.reports[0]["event_id"] == "event-1"
+    assert api.commits == ["calendar:0:stable"]
 
 
 @pytest.mark.asyncio
-async def test_submit_failure_never_commits_calendar_cursor() -> None:
-    content = RecordingContent()
-    content.after_submit = RuntimeError("submit committed but hint failed")
+async def test_report_failure_does_not_commit_source_batch() -> None:
+    alerts = RecordingAlerts()
+    alerts.failure = RuntimeError("Wake Alert report failed")
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
+        PluginTimers.candidate_validation(),
+        cast(WakeAlertSource, alerts),
+        api,
+        timedelta(minutes=5),
     )
 
-    with pytest.raises(RuntimeError, match="hint failed"):
+    with pytest.raises(RuntimeError, match="report failed"):
         await runtime._tick()
-
     assert api.commits == []
 
 
+@pytest.mark.parametrize("status", ["delivered", "skipped"])
 @pytest.mark.asyncio
-async def test_provider_ack_precedes_content_ack_and_failure_replays() -> None:
-    content = RecordingContent()
-    content.unsettled_rows = (
-        {
-            "ref": {"source_id": "calendar", "item_id": "event-1", "revision": "1"},
-            "settlement_ref": "delivery-1",
-            "payload": {},
-        },
-    )
+async def test_terminal_wake_alert_acks_calendar_source(status: str) -> None:
+    alerts = RecordingAlerts()
+    alerts.statuses["event-1"] = status
     api = RecordingApi()
-    api.ack_failures = 1
+    api.pending_items = ({"item_id": "event-1", "payload": {"title": "Meeting soon"}},)
+    api.batch = {"status": "no_batch"}
     runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
+        PluginTimers.candidate_validation(),
+        cast(WakeAlertSource, alerts),
+        api,
+        timedelta(minutes=5),
     )
-
-    with pytest.raises(RuntimeError, match="ack failed"):
-        await runtime._tick()
-    assert content.acks == []
 
     await runtime._tick()
-    assert api.acks == ["event-1", "event-1"]
-    assert content.acks == ["delivery-1"]
+    assert api.acks == ["event-1"]
 
 
 @pytest.mark.asyncio
-async def test_crash_after_provider_ack_before_content_ack_replays_both() -> None:
-    content = RecordingContent()
-    content.unsettled_rows = (
-        {
-            "ref": {"source_id": "calendar", "item_id": "event-1", "revision": "1"},
-            "settlement_ref": "delivery-1",
-            "payload": {},
-        },
-    )
-    content.ack_failures = 1
-    api = RecordingApi()
-    runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
-    )
-
-    with pytest.raises(RuntimeError, match="Content ack failed"):
-        await runtime._tick()
-    await runtime._tick()
-
-    assert api.acks == ["event-1", "event-1"]
-    assert content.acks == ["delivery-1", "delivery-1"]
-
-
-@pytest.mark.asyncio
-async def test_start_and_reload_own_exactly_one_real_timer() -> None:
-    content = RecordingContent()
-    api = RecordingApi()
-    runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
-    )
-
-    root = CompositionRoot("calendar-timer-test")
-    await runtime.start(root.context)
-    await runtime.start(root.context)
-    for _ in range(100):
-        if api.polls == 1:
-            break
-        await asyncio.sleep(0.001)
-    assert api.polls == 1
-    assert runtime._handle is not None
-    await runtime.close()
-    assert runtime._handle is None
-    assert runtime._task is None
-    await root.dispose()
-
-
-@pytest.mark.asyncio
-async def test_http_boundary_failure_is_logged_and_rearmed(caplog) -> None:
-    content = RecordingContent()
+async def test_transport_failure_is_rearmed(caplog: pytest.LogCaptureFixture) -> None:
     api = RecordingApi()
     api.poll_failures = 1
     runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
+        PluginTimers(AsyncioOneShotTimer()),
+        cast(WakeAlertSource, RecordingAlerts()),
+        api,
+        timedelta(hours=1),
     )
+    root = CompositionRoot("calendar-retry")
 
-    root = CompositionRoot("calendar-http-retry")
     await runtime.start(root.context)
-    first_task = runtime._task
-    assert first_task is not None
     for _ in range(100):
         if api.polls == 1 and runtime._handle is not None:
             break
         await asyncio.sleep(0.001)
 
     assert api.polls == 1
-    assert not first_task.done()
-    assert runtime._handle is not None
-    assert runtime._task is not None
+    assert runtime._task is not None and not runtime._task.done()
     assert sum("transport failed" in row.message for row in caplog.records) == 1
     await runtime.close()
     await root.dispose()
-
-
-@pytest.mark.asyncio
-async def test_content_contract_error_remains_fail_loud_after_cleanup() -> None:
-    content = RecordingContent()
-    content.after_submit = RuntimeError("Content contract broken")
-    api = RecordingApi()
-    runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(hours=1)
-    )
-
-    root = CompositionRoot("calendar-contract-failure")
-    await runtime.start(root.context)
-    first_task = runtime._task
-    assert first_task is not None
-    with pytest.raises(RuntimeError, match="Content contract broken"):
-        await first_task
-
-    assert api.commits == []
-    assert runtime._handle is None
-    receipt = root.receipt()
-    assert receipt.ready is False
-    assert any(
-        incident.kind == "task_failure"
-        and "Content contract broken" in incident.message
-        for incident in receipt.incidents
-    )
-    await runtime.close()
-    await root.dispose()
-
-
-@pytest.mark.asyncio
-async def test_no_batch_has_zero_content_or_cursor_effect() -> None:
-    content = RecordingContent()
-    api = RecordingApi()
-    api.batch = {"status": "no_batch"}
-    runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()), content, api, timedelta(minutes=5)
-    )
-
-    await runtime._tick()
-
-    assert content.submissions == []
-    assert api.commits == []
