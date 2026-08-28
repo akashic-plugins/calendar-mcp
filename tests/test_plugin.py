@@ -29,7 +29,7 @@ from agent.plugin_composition.process_slots import (
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
-from plugins.wake.contracts import WAKE_ALERT_SOURCE, WakeAlertSource
+from plugin import BoundAlertSource, EVENTMAIL_ALERT_SOURCE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,9 +48,17 @@ class RecordingAlerts:
         self.reports.append(dict(kwargs))
         return {"accepted": True}
 
-    def status(self, *, source_id: str, event_id: str) -> str | None:
-        assert source_id == "calendar"
+    def status(self, *, event_id: str) -> str | None:
         return self.statuses.get(event_id)
+
+
+class AlertSources:
+    def __init__(self, alerts: RecordingAlerts) -> None:
+        self.alerts = alerts
+
+    def bind(self, source_id: str) -> BoundAlertSource:
+        assert source_id == "calendar"
+        return self.alerts
 
 
 class RecordingApi:
@@ -100,7 +108,9 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
-    _ = await root.context.provide(WAKE_ALERT_SOURCE, RecordingAlerts())
+    _ = await root.context.provide(
+        EVENTMAIL_ALERT_SOURCE, AlertSources(RecordingAlerts())
+    )
 
     await root.mount(
         ComposablePlugin.from_module(calendar_module),
@@ -123,13 +133,38 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     ].definition
     assert process == calendar_module.CALENDAR_PROCESS
     assert mcp.endpoint_env[0].process == process.name
-    assert calendar_module.inject[-1] == WAKE_ALERT_SOURCE
+    assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
+    await root.dispose()
+
+
+@pytest.mark.asyncio
+async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path) -> None:
+    root = CompositionRoot("calendar:without-eventmail")
+    processes = PluginManagedProcesses(root.instance_token)
+    servers = PluginMcpServers(root.instance_token)
+    await root.context.provide(MANAGED_PROCESSES, processes)
+    await root.context.provide(MCP_SERVERS, servers)
+    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    await root.mount(
+        ComposablePlugin.from_module(calendar_module),
+        name="calendar",
+        runtime=PluginRuntime(
+            plugin_id="calendar",
+            generation_id="calendar:without-eventmail",
+            plugin_dir=ROOT,
+            data_dir=tmp_path / "plugin-data",
+            workspace=tmp_path / "workspace",
+            config=CalendarConfig(),
+        ),
+    )
+
+    assert "calendar" in _freeze_plugin_mcp_servers(servers, root.instance_token)
     await root.dispose()
 
 
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
-    assert manifest.version == calendar_module.version == "3.2.0"
+    assert manifest.version == calendar_module.version == "3.2.1"
     assert manifest.mcp_servers[0].required_tools == ()
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 
@@ -140,7 +175,7 @@ async def test_tick_reports_alert_before_committing_source_batch() -> None:
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
         PluginTimers.candidate_validation(),
-        cast(WakeAlertSource, alerts),
+        cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
     )
@@ -158,7 +193,7 @@ async def test_report_failure_does_not_commit_source_batch() -> None:
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
         PluginTimers.candidate_validation(),
-        cast(WakeAlertSource, alerts),
+        cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
     )
@@ -168,7 +203,7 @@ async def test_report_failure_does_not_commit_source_batch() -> None:
     assert api.commits == []
 
 
-@pytest.mark.parametrize("status", ["delivered", "skipped"])
+@pytest.mark.parametrize("status", ["delivered", "skipped", "expired"])
 @pytest.mark.asyncio
 async def test_terminal_wake_alert_acks_calendar_source(status: str) -> None:
     alerts = RecordingAlerts()
@@ -178,7 +213,7 @@ async def test_terminal_wake_alert_acks_calendar_source(status: str) -> None:
     api.batch = {"status": "no_batch"}
     runtime = CalendarSourceRuntime(
         PluginTimers.candidate_validation(),
-        cast(WakeAlertSource, alerts),
+        cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
     )
@@ -193,7 +228,7 @@ async def test_transport_failure_is_rearmed(caplog: pytest.LogCaptureFixture) ->
     api.poll_failures = 1
     runtime = CalendarSourceRuntime(
         PluginTimers(AsyncioOneShotTimer()),
-        cast(WakeAlertSource, RecordingAlerts()),
+        cast(BoundAlertSource, RecordingAlerts()),
         api,
         timedelta(hours=1),
     )

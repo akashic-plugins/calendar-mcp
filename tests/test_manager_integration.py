@@ -58,8 +58,8 @@ def _stage_calendar(tmp_path: Path) -> Path:
 
 
 def _stage_content(tmp_path: Path) -> Path:
-    source = tmp_path / "content"
-    shutil.copytree(CORE / "plugins" / "content", source)
+    source = tmp_path / "eventmail"
+    shutil.copytree(CORE / "plugins" / "eventmail", source)
     return source
 
 
@@ -96,7 +96,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         generations = {
             item.plugin_id: item for item in snapshot.generations.values()
         }
-        assert set(generations) == {"calendar", "content"}
+        assert set(generations) == {"calendar", "eventmail"}
         generation_id = generations["calendar"].generation_id
         runtime = manager.composition_generation_host.get(generation_id)
         assert runtime is not None and runtime.mode == "formal"

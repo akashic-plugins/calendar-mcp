@@ -11,7 +11,6 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field
 
-from agent.control.timer import TimerHandle, TimerStatus
 from agent.plugin_composition import (
     MANAGED_PROCESSES,
     MCP_SERVERS,
@@ -23,11 +22,35 @@ from agent.plugin_composition import (
     ManagedProcessDefinition,
     McpServerDefinition,
     PluginTimers,
+    ServiceKey,
+    TimerHandle,
+    TimerStatus,
 )
-from plugins.wake.contracts import WAKE_ALERT_SOURCE, WakeAlertSource
 
 
 logger = logging.getLogger(__name__)
+
+
+class BoundAlertSource(Protocol):
+    def report(
+        self,
+        *,
+        event_id: str,
+        payload: Mapping[str, object],
+        observed_at: datetime,
+        expires_at: datetime | None = None,
+    ) -> Mapping[str, object]: ...
+
+    def status(self, *, event_id: str) -> str | None: ...
+
+
+class AlertSourceServices(Protocol):
+    def bind(self, source_id: str) -> BoundAlertSource: ...
+
+
+EVENTMAIL_ALERT_SOURCE = ServiceKey[AlertSourceServices](
+    "eventmail.alert_source.v1"
+)
 
 
 class CalendarContentApiPort(Protocol):
@@ -69,10 +92,10 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.2.0"
+version = "3.2.1"
 desc = "Google Calendar MCP and durable Alert source plugin"
 Config = CalendarConfig
-inject = (MANAGED_PROCESSES, MCP_SERVERS, TIMERS, WAKE_ALERT_SOURCE)
+inject = (MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
 
 class CalendarContentApi:
@@ -133,7 +156,7 @@ class CalendarSourceRuntime:
     def __init__(
         self,
         timers: PluginTimers,
-        alerts: WakeAlertSource,
+        alerts: BoundAlertSource,
         api: CalendarContentApiPort,
         interval: timedelta,
     ) -> None:
@@ -196,9 +219,10 @@ class CalendarSourceRuntime:
         # 1. Submitted Calendar rows remain queryable until Wake reaches a terminal state.
         for item in await self._api.pending():
             event_id, payload, _expires_at = _alert_item(item)
-            if self._alerts.status(source_id="calendar", event_id=event_id) in {
+            if self._alerts.status(event_id=event_id) in {
                 "delivered",
                 "skipped",
+                "expired",
             }:
                 _ = await self._api.acknowledge(event_id)
 
@@ -219,7 +243,6 @@ class CalendarSourceRuntime:
                 raise RuntimeError("calendar Alert batch item 不是对象")
             event_id, payload, expires_at = _alert_item(item)
             _ = self._alerts.report(
-                source_id="calendar",
                 event_id=event_id,
                 payload=payload,
                 observed_at=now,
@@ -253,20 +276,29 @@ async def apply(ctx: Context, config: object) -> None:
         ),
     )
 
-    # 2. The Alert source owns its lifecycle through existing hooks.
-    runtime = CalendarSourceRuntime(
-        ctx.require(TIMERS),
-        ctx.require(WAKE_ALERT_SOURCE),
-        CalendarContentApi(CALENDAR_PROCESS.formal_port),
-        timedelta(seconds=config.content.poll_interval_seconds),
+    # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
+    async def apply_eventmail(source_ctx: Context) -> None:
+        runtime = CalendarSourceRuntime(
+            source_ctx.require(TIMERS),
+            source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar"),
+            CalendarContentApi(CALENDAR_PROCESS.formal_port),
+            timedelta(seconds=config.content.poll_interval_seconds),
+        )
+
+        def setup() -> object:
+            return runtime.close
+
+        _ = await source_ctx.effect(setup, label="calendar-alert-runtime")
+        _ = await source_ctx.on(
+            RUNTIME_STARTED, lambda _event: runtime.start(source_ctx)
+        )
+        _ = await source_ctx.on(RUNTIME_STOPPING, lambda _event: runtime.close())
+
+    _ = await ctx.inject(
+        (TIMERS, EVENTMAIL_ALERT_SOURCE),
+        apply_eventmail,
+        name="calendar-eventmail-source",
     )
-
-    def setup() -> object:
-        return runtime.close
-
-    _ = await ctx.effect(setup, label="calendar-alert-runtime")
-    _ = await ctx.on(RUNTIME_STARTED, lambda _event: runtime.start(ctx))
-    _ = await ctx.on(RUNTIME_STOPPING, lambda _event: runtime.close())
 
 
 def _alert_item(
