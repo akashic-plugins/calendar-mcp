@@ -131,7 +131,8 @@ class CalendarContentStore:
             rows = connection.execute(
                 """
                 SELECT event_id, revision, starts_at, title, content,
-                       raw_event_id, calendar_id, payload_json, payload_origin
+                       raw_event_id, calendar_id, payload_json, payload_origin,
+                       expires_at
                 FROM pending_alerts
                 WHERE submitted_batch_id IS NULL
                 ORDER BY event_id
@@ -200,6 +201,20 @@ class CalendarContentStore:
                 (batch_id, batch_id),
             )
             return {"committed": True, "duplicate": False}
+
+    def pending(self) -> list[dict[str, object]]:
+        """Return every unacknowledged Alert regardless of batch state."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, revision, starts_at, title, content,
+                       raw_event_id, calendar_id, payload_json, payload_origin,
+                       expires_at
+                FROM pending_alerts ORDER BY event_id
+                """
+            ).fetchall()
+        return [_content_item(row) for row in rows]
 
     def acknowledge(self, event_id: str, now: datetime) -> dict[str, object]:
         """Record provider acknowledgement idempotently and clear its pending fact."""
@@ -352,7 +367,20 @@ class CalendarContentStore:
                 last_seen_at, expires_at, revision, submitted_batch_id,
                 payload_json, payload_origin
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'full')
-            ON CONFLICT(event_id) DO NOTHING
+            ON CONFLICT(event_id) DO UPDATE SET
+                raw_event_id = excluded.raw_event_id,
+                calendar_id = excluded.calendar_id,
+                starts_at = excluded.starts_at,
+                title = excluded.title,
+                content = excluded.content,
+                last_seen_at = excluded.last_seen_at,
+                expires_at = excluded.expires_at,
+                revision = excluded.revision,
+                submitted_batch_id = NULL,
+                payload_json = excluded.payload_json,
+                payload_origin = excluded.payload_origin
+            WHERE pending_alerts.revision <> excluded.revision
+               OR pending_alerts.payload_json <> excluded.payload_json
             """,
             (
                 event_id,
@@ -419,6 +447,13 @@ def commit_content_batch(batch_id: str) -> dict[str, object]:
     return store.commit(batch_id, datetime.now(UTC))
 
 
+def pending_content() -> dict[str, object]:
+    config = load_config()
+    store = CalendarContentStore(config.db_path)
+    store.initialize()
+    return {"items": store.pending()}
+
+
 def acknowledge_content(event_id: str) -> dict[str, object]:
     config = load_config()
     store = CalendarContentStore(config.db_path)
@@ -469,9 +504,7 @@ def _to_event(
     summary = str(raw.get("summary", "")).strip() or "未命名日程"
     revision = str(raw.get("updated", "")).strip() or starts_at.isoformat()
     raw_id = str(raw.get("id", "")).strip()
-    digest = hashlib.sha1(
-        f"{calendar_id}|{raw_id}|{starts_at.isoformat()}|{revision}".encode()
-    ).hexdigest()[:16]
+    digest = hashlib.sha1(f"{calendar_id}|{raw_id}".encode()).hexdigest()[:16]
     return {
         "event_id": f"calalert_{digest}",
         "revision": revision,
@@ -503,6 +536,7 @@ def _content_item(row: sqlite3.Row) -> dict[str, object]:
         "revision": row["revision"],
         "payload": json.loads(row["payload_json"]),
         "not_before": row["starts_at"],
+        "expires_at": row["expires_at"],
         "requires_ack": True,
     }
 

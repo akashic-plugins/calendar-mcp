@@ -27,6 +27,7 @@ from google.auth.transport.requests import Request
 from src.content_source import (
     acknowledge_content,
     commit_content_batch,
+    pending_content,
     poll_content,
 )
 
@@ -266,6 +267,13 @@ def poll_content_endpoint():
     """Freeze or replay the current Calendar Content batch."""
 
     return poll_content()
+
+
+@app.post("/content/pending", tags=["Content"], operation_id="pending_content")
+def pending_content_endpoint():
+    """Return unacknowledged Calendar alerts after batch commit."""
+
+    return pending_content()
 
 
 @app.post("/content/commit", tags=["Content"], operation_id="commit_content")
