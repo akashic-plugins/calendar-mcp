@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import socket
 from pathlib import Path
@@ -8,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from agent.plugins.manager import PluginManager
+from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
+from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 
 
@@ -63,6 +66,18 @@ def _stage_content(tmp_path: Path) -> Path:
     return source
 
 
+def _prepare_python_environment(source: Path, workspace: Path) -> None:
+    """通过安装 owner 为测试 artifact 固定独立 Python 环境。"""
+
+    manifest = load_static_plugin_manifest(source)
+    environments = PythonEnvironments(workspace)
+    refs = {
+        item.runtime_root: environments.prepare(source, item)
+        for item in manifest.python
+    }
+    (source / ENVIRONMENT_FILE).write_text(json.dumps(refs), encoding="utf-8")
+
+
 @pytest.mark.asyncio
 async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     tmp_path: Path,
@@ -81,6 +96,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     content = _stage_content(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    _prepare_python_environment(calendar, workspace)
     manager = PluginManager(
         plugin_dirs=[content, calendar],
         event_bus=EventBus(),
@@ -113,9 +129,12 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         assert process.endpoint("calendar_api").port == FORMAL_PORT
         server = mcp.server("calendar")
         route = server.route()
-        assert set(route.tool_names) == EXPECTED_TOOLS
-        assert "get_proactive_events" not in route.tool_names
-        assert "acknowledge_events" not in route.tool_names
+        assert set(server.tool_names) == EXPECTED_TOOLS
+        assert "get_proactive_events" not in server.tool_names
+        assert "acknowledge_events" not in server.tool_names
+        call = await route.call("analyze_busyness", {})
+        assert not call.success
+        assert "validation error" in call.output.lower()
 
         receipt = snapshot.composition_root.receipt()
         health = {item.name: item.healthy for item in receipt.health}

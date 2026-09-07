@@ -112,9 +112,11 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
         EVENTMAIL_ALERT_SOURCE, AlertSources(RecordingAlerts())
     )
 
+    plugin = ComposablePlugin.from_module(calendar_module)
     await root.mount(
-        ComposablePlugin.from_module(calendar_module),
+        plugin.apply,
         name="calendar",
+        inject=plugin.inject,
         runtime=PluginRuntime(
             plugin_id="calendar",
             generation_id="calendar:test",
@@ -145,9 +147,11 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    plugin = ComposablePlugin.from_module(calendar_module)
     await root.mount(
-        ComposablePlugin.from_module(calendar_module),
+        plugin.apply,
         name="calendar",
+        inject=plugin.inject,
         runtime=PluginRuntime(
             plugin_id="calendar",
             generation_id="calendar:without-eventmail",
