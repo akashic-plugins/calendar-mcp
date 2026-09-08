@@ -18,3 +18,10 @@ for path in (repo_root, repo_root / "mcp", agent_root):
 _test_data_dir = tempfile.TemporaryDirectory(prefix="calendar-plugin-tests-")
 if not os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip():
     os.environ["AKA_PLUGIN_DATA_DIR"] = _test_data_dir.name
+
+from types import ModuleType
+
+package = ModuleType("calendar_test_plugin")
+package.__path__ = [str(repo_root)]
+package.__package__ = "calendar_test_plugin"
+sys.modules["calendar_test_plugin"] = package

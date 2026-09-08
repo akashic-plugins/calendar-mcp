@@ -9,6 +9,9 @@ from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from plugins.tools.plugin import TOOLS
+from .tools import register_tools
+
 from pydantic import BaseModel, Field
 
 from agent.plugin_composition import (
@@ -92,10 +95,10 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.2.1"
+version = "3.2.2"
 desc = "Google Calendar MCP and durable Alert source plugin"
 Config = CalendarConfig
-inject = (MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
+inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
 
 class CalendarContentApi:
@@ -275,6 +278,8 @@ async def apply(ctx: Context, config: object) -> None:
             },
         ),
     )
+
+    await register_tools(ctx)
 
     # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
     async def apply_eventmail(source_ctx: Context) -> None:
