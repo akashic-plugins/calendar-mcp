@@ -66,3 +66,7 @@ Content.unsettled ──▶ Calendar ACK ──▶ Content.ack
 记录。运行日志仍由 Core 的 bounded log ring 固定容量轮转。新事件保存完整 payload；
 旧 schema 未保存的 URL 等字段无法恢复，迁移行以 `legacy_fallback` 明确标记，并从
 迁移后的 `content.json` 恢复 source 配置。
+
+### 用户工具发现
+
+`plugin.py` 向 `TOOLS` 注册用户工具，保留 `mcp_calendar__` 名称。目录来自 MCP `tools/list`，加载插件不会启动 MCP；实际调用才打开本插件的 MCP 路由。服务端负责参数校验，MCP 工具错误和传输失败保留原语义。修改 MCP 签名或描述时同步更新 `tool_catalog.json`。
