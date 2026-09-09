@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: kachofugetsu09/akashic-agent
-          ref: 80a1a0738c79041ef282f8e97e3fa3e066d95fa2
+          ref: c2993eedde3fefa8648c31257b2f35a69864ccfe
           path: .akashic-core
       - uses: actions/setup-python@v5
         with:
@@ -55,5 +55,5 @@ jobs:
       - name: Verify Calendar v3 composition and runtime
         env:
           AKASHIC_AGENT_ROOT: .akashic-core
-          PYTHONPATH: .akashic-core:mcp/.venv/lib/python3.13/site-packages
+          PYTHONPATH: .akashic-core:mcp/.venv/lib/python3.13/site-packages:${{ github.workspace }}/.akashic-core/sdk/python/src
         run: mcp/.venv/bin/python -m pytest -q tests/
