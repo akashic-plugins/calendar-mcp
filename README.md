@@ -20,7 +20,7 @@ Calendar HTTP/Google，也不写正式 Content 或 Calendar 数据。
 
 插件代码安装到 `~/.akashic-plugin/cache/<marketplace>/calendar/<version>/`，运行数据保存在 `~/.akashic-plugin/data/calendar-<marketplace>/`：
 
-- `.env`：Google OAuth 客户端配置
+- `.env`：Google OAuth 客户端配置。Core 注入的 `PORT` 优先于旧 `.env` 的端口值，受管 API 与 MCP 始终使用同一次调用分配的端口。
 - `.gcp-saved-tokens.json`：OAuth Token
 - `content.json`：Content 日历来源配置
 - `calendar_alerts.sqlite3`：提醒确认状态

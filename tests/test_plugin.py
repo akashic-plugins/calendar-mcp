@@ -175,7 +175,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
 
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
-    assert manifest.version == calendar_module.version == "3.2.2"
+    assert manifest.version == calendar_module.version == "3.2.3"
     assert manifest.mcp_servers[0].required_tools == ()
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 

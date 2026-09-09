@@ -95,7 +95,7 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.2.2"
+version = "3.2.3"
 desc = "Google Calendar MCP and durable Alert source plugin"
 Config = CalendarConfig
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
