@@ -15,7 +15,11 @@ def _configure_environment() -> Path:
         raise RuntimeError("calendar MCP 缺少 AKA_PLUGIN_DATA_DIR")
     data_dir = Path(raw_data_dir).expanduser()
     data_dir.mkdir(parents=True, exist_ok=True)
+    # MCP 必须连接本次调用的服务端口，不能退回 .env 的正式端口。
+    managed_port = os.environ.get("PORT")
     load_dotenv(data_dir / ".env", override=True)
+    if managed_port is not None:
+        os.environ["PORT"] = managed_port
     os.environ["TOKEN_FILE_PATH"] = str(data_dir / ".gcp-saved-tokens.json")
     os.environ["CALENDAR_CONTENT_CONFIG_PATH"] = str(data_dir / "content.json")
     os.environ.setdefault("RELOAD", "false")

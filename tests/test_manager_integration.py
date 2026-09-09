@@ -5,6 +5,7 @@ import json
 import shutil
 import socket
 from pathlib import Path
+from urllib.request import ProxyHandler, build_opener
 
 import pytest
 
@@ -140,6 +141,29 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         call = await route.call("analyze_busyness", {})
         assert not call.success
         assert "validation error" in call.output.lower()
+
+        # 运行数据可能保留正式端口；归档调用必须使用 Core 分配的独立端口。
+        data_dir = process_catalog["calendar_api"].runtime_data_dir
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / ".env").write_text(
+            "PORT=18000\nGOOGLE_CLIENT_ID=fixture-client\nGOOGLE_CLIENT_SECRET=fixture-secret\n",
+            encoding="utf-8",
+        )
+        async with manager.composition_generation_host.open_mcp(snapshot, "calendar") as scoped:
+            bound = manager.composition_generation_host.get(scoped.generation_id)
+            assert bound is not None and bound.processes is not None
+            assert bound.processes.endpoint("calendar_api").port != FORMAL_PORT
+            scoped_route = scoped.route()
+            try:
+                unavailable = await scoped_route.call("list_calendars", {})
+                assert "503" in unavailable.output
+                assert "/calendars" in "".join(bound.processes.logs("calendar_api").lines)
+                assert "/calendars" not in "".join(process.logs("calendar_api").lines)
+            finally:
+                await scoped_route.aclose()
+
+        with build_opener(ProxyHandler({})).open(process.endpoint("calendar_api").readiness_url, timeout=3) as response:
+            assert response.status == 200
 
         receipt = snapshot.composition_root.receipt()
         health = {item.name: item.healthy for item in receipt.health}

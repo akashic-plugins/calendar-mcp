@@ -19,7 +19,11 @@ def _runtime_dir() -> Path:
 
 
 RUNTIME_DIR = _runtime_dir()
+# Core 分配的端口不能被旧 .env 覆盖，否则归档调用会撞上正式进程。
+managed_port = os.environ.get("PORT")
 load_dotenv(RUNTIME_DIR / ".env", override=True)
+if managed_port is not None:
+    os.environ["PORT"] = managed_port
 os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
 os.environ["CALENDAR_CONTENT_CONFIG_PATH"] = str(RUNTIME_DIR / "content.json")
 os.environ.setdefault("RELOAD", "false")
