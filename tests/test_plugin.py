@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from plugins.tools.plugin import TOOLS, ToolCatalog
+from calendar_test_plugin.tools import CALENDAR_TOOLS
 
 import pytest
 
@@ -139,7 +140,7 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     assert process == calendar_module.CALENDAR_PROCESS
     assert mcp.endpoint_env[0].process == process.name
     assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
-    assert any(item["name"].startswith("mcp_calendar__") for item in root.context.require(TOOLS).descriptions())
+    assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
     await root.dispose()
 
 
@@ -168,7 +169,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
     )
 
     assert "calendar" in _freeze_plugin_mcp_servers(servers, root.instance_token)
-    assert any(item["name"].startswith("mcp_calendar__") for item in root.context.require(TOOLS).descriptions())
+    assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
     await root.dispose()
 
 

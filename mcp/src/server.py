@@ -1,3 +1,6 @@
+import httplib2
+from google.auth.exceptions import TransportError
+from googleapiclient.errors import HttpError
 import logging
 import uvicorn
 import sys
@@ -266,7 +269,16 @@ class ContentAckRequest(BaseModel):
 def poll_content_endpoint():
     """Freeze or replay the current Calendar Content batch."""
 
-    return poll_content()
+    try:
+        return poll_content()
+    except HttpError as error:
+        status = int(error.resp.status)
+        retryable = status == 429 or status >= 500
+        raise HTTPException(status_code=503 if retryable else 502,
+                            detail=f"Google Calendar upstream HTTP {status}") from error
+    except (OSError, httplib2.HttpLib2Error, TransportError) as error:
+        raise HTTPException(status_code=503,
+                            detail=f"Google Calendar transport failed: {type(error).__name__}") from error
 
 
 @app.post("/content/pending", tags=["Content"], operation_id="pending_content")
