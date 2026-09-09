@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from session.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
@@ -47,6 +48,8 @@ def _stage_calendar(tmp_path: Path) -> Path:
     (source / "mcp" / "src").mkdir(parents=True)
     for relative in (
         "plugin.py",
+        "tools.py",
+        "tool_catalog.json",
         "akashic.plugin.toml",
         "mcp/requirements.txt",
         "mcp/run_mcp.py",
@@ -97,8 +100,10 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _prepare_python_environment(calendar, workspace)
+    log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
-        plugin_dirs=[content, calendar],
+        message_log=log,
+        plugin_dirs=[content, calendar, CORE / "plugins" / "tools"],
         event_bus=EventBus(),
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
@@ -112,7 +117,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         generations = {
             item.plugin_id: item for item in snapshot.generations.values()
         }
-        assert set(generations) == {"calendar", "eventmail"}
+        assert set(generations) == {"calendar", "eventmail", "tools"}
         generation_id = generations["calendar"].generation_id
         runtime = manager.composition_generation_host.get(generation_id)
         assert runtime is not None and runtime.mode == "formal"
@@ -148,6 +153,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         if route is not None:
             await route.aclose()
         await manager.terminate_all()
+        log.close()
 
     assert _port_free(FORMAL_PORT)
     assert manager.composition_generation_host.get(generation_id) is None

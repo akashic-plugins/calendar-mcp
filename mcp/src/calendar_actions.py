@@ -59,7 +59,7 @@ def find_events(
     privateExtendedProperty: Optional[str] = None, # Filter by private extended properties (key=value or key)
     showDeleted: bool = False, # Show deleted events
     eventTypes: Optional[List[str]] = None # Filter by event types (e.g., ['default', 'focusTime'])
-) -> Optional[EventsResponse]:
+) -> EventsResponse:
     """Finds events in a specified calendar based on various criteria.
 
     Args:
@@ -78,11 +78,9 @@ def find_events(
         eventTypes: List of event types to return (e.g., ['default', 'focusTime', 'outOfOffice']).
 
     Returns:
-        An EventsResponse object containing the list of events, or None if an error occurs.
+        An EventsResponse object. Google API and transport failures propagate.
     """
     service = _get_calendar_service(credentials)
-    if not service:
-        return None
 
     # Format datetime objects to RFC3339 string format required by the API
     time_min_str = time_min.isoformat() + 'Z' if time_min and time_min.tzinfo is None else (time_min.isoformat() if time_min else None)
@@ -116,27 +114,10 @@ def find_events(
         # f"eventTypes={eventTypes}"
     )
 
-    try:
-        events_result = service.events().list(**list_kwargs).execute()
-
-        logger.info(f"Found {len(events_result.get('items', []))} events.")
-
-        # Parse the result using Pydantic models for validation and structure
-        events_response = EventsResponse(**events_result)
-        return events_response
-
-    except HttpError as error:
-        logger.error(f"An API error occurred while finding events: {error}", exc_info=True)
-        # Add more detailed logging if possible
-        try:
-            error_content = error.content.decode('utf-8')
-            logger.error(f"Google API error details (find_events): {error.resp.status} - {error_content}")
-        except Exception:
-            logger.error(f"Google API error details (find_events): {error.resp.status} - Could not decode error content.")
-        return None
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while finding events: {e}", exc_info=True)
-        return None
+    # 只读查询由 Google SDK 重试临时网络、限流和服务端错误。
+    events_result = service.events().list(**list_kwargs).execute(num_retries=2)
+    logger.info(f"Found {len(events_result.get('items', []))} events.")
+    return EventsResponse(**events_result)
 
 def create_event(
     credentials: Credentials,

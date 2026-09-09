@@ -144,7 +144,12 @@ class CalendarContentApi:
         try:
             with urlopen(request, timeout=30) as response:
                 result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError) as error:
+        except HTTPError as error:
+            detail = error.read(4096).decode("utf-8", errors="replace")
+            raise CalendarContentApiError(
+                f"calendar Content API {path} failed: HTTP {error.code}: {detail}"
+            ) from error
+        except (URLError, TimeoutError) as error:
             raise CalendarContentApiError(
                 f"calendar Content API {path} failed: {error}"
             ) from error
@@ -279,7 +284,7 @@ async def apply(ctx: Context, config: object) -> None:
         ),
     )
 
-    await register_tools(ctx)
+    await register_tools(ctx, description=desc)
 
     # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
     async def apply_eventmail(source_ctx: Context) -> None:
