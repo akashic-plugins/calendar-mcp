@@ -18,7 +18,6 @@ from bus.event_bus import EventBus
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = Path(os.environ.get("AKASHIC_AGENT_ROOT", "")).resolve()
-MCP_RUNTIME = ROOT / "mcp" / ".venv"
 FORMAL_PORT = 18000
 EXPECTED_TOOLS = frozenset(
     {
@@ -44,12 +43,20 @@ def _port_free(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) != 0
 
 
+def _fixture_runtime() -> Path:
+    """Use the caller-selected artifact Python runtime for MCP subprocesses."""
+
+    artifact_python = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"])
+    return artifact_python.parent.parent
+
+
 def _stage_calendar(tmp_path: Path) -> Path:
     source = tmp_path / "calendar"
     (source / "mcp" / "src").mkdir(parents=True)
     for relative in (
         "plugin.py",
         "tools.py",
+        "_tool_contract.py",
         "tool_catalog.json",
         "akashic.plugin.toml",
         "mcp/requirements.txt",
@@ -60,7 +67,9 @@ def _stage_calendar(tmp_path: Path) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
     shutil.copytree(ROOT / "mcp" / "src", source / "mcp" / "src", dirs_exist_ok=True)
-    (source / "mcp" / ".venv").symlink_to(MCP_RUNTIME, target_is_directory=True)
+    (source / "mcp" / ".venv").symlink_to(
+        _fixture_runtime(), target_is_directory=True
+    )
     return source
 
 
@@ -89,12 +98,13 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
 ) -> None:
     """Boot the real loader/process/MCP boundary without starting the poll lifecycle."""
 
-    runtime_python = MCP_RUNTIME / "bin" / "python"
+    runtime = _fixture_runtime()
+    runtime_python = runtime / "bin" / "python"
     if not runtime_python.is_file() or not os.access(runtime_python, os.X_OK):
         pytest.fail(f"Calendar MCP runtime is not staged: {runtime_python}")
     assert _port_free(FORMAL_PORT)
     monkeypatch.setenv(
-        "PATH", f"{MCP_RUNTIME / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+        "PATH", f"{runtime / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
     )
     calendar = _stage_calendar(tmp_path)
     content = _stage_content(tmp_path)
@@ -123,7 +133,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         generations = {
             item.plugin_id: item for item in snapshot.generations.values()
         }
-        assert set(generations) == {"calendar", "eventmail", "tools"}
+        assert set(generations) == {"calendar", "content", "eventmail", "tools"}
         generation_id = generations["calendar"].generation_id
         runtime = manager.composition_generation_host.get(generation_id)
         assert runtime is not None and runtime.mode == "formal"
