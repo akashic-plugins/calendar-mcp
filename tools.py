@@ -29,7 +29,7 @@ class McpTool:
         return arguments
 
     async def invoke(self, key: str, arguments: Mapping[str, object]) -> Result:
-        value = await self._route.call(self._name, arguments)
+        value = await self._route.call(tool_name=self._name, arguments=arguments)
         return Result(
             "success" if value.success else "error",
             (ContentPart("text", value.output),),

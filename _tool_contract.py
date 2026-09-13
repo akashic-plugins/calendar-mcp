@@ -108,8 +108,10 @@ class McpRoute(Protocol):
 
     async def call(
         self,
-        name: str,
+        tool_name: str,
         arguments: Mapping[str, object],
+        *,
+        timeout: float | None = None,
     ) -> McpCallResult: ...
 
     async def __aenter__(self) -> McpRoute: ...

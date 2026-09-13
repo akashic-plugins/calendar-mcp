@@ -34,8 +34,9 @@ async def test_discovery_is_lazy_and_calls_keep_route_errors():
             return ToolRef(record["name"], record)
 
     class Route:
-        async def call(self, name, arguments):
-            calls.append((name, arguments))
+        async def call(self, tool_name, arguments, *, timeout=None):
+            assert timeout is None
+            calls.append((tool_name, arguments))
             if arguments.get("fail_transport"):
                 raise ConnectionError("MCP disconnected")
             return McpCallResult("tool_error" if arguments.get("fail_tool") else "success", "remote result")
