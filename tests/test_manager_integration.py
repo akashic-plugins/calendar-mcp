@@ -104,7 +104,12 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
         message_log=log,
-        plugin_dirs=[content, calendar, CORE / "plugins" / "tools"],
+        plugin_dirs=[
+            content,
+            calendar,
+            CORE / "plugins" / "content",
+            CORE / "plugins" / "tools",
+        ],
         event_bus=EventBus(),
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
