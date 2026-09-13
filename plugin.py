@@ -9,7 +9,7 @@ from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from plugins.tools.plugin import TOOLS
+from ._tool_contract import TOOLS
 from .tools import register_tools
 
 from pydantic import BaseModel, Field

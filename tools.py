@@ -6,11 +6,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from agent.plugin_composition import MCP_SERVERS, Context, ServiceKey
-from agent.plugins.mcp_generation_host import McpRoute
-from plugins.tools.api import BoundTool, CallSource, Result
-from plugins.tools.plugin import TOOLS, ToolRef, ToolView
-from session.message import ContentPart
-from session.message_codec import json_value
+from agent.plugin_contracts import ContentPart, json_value
+
+from ._tool_contract import BoundTool, CallSource, McpRoute, Result, TOOLS, ToolRef, ToolView
 
 
 CALENDAR_TOOLS = ServiceKey[ToolView]("calendar.tools.v1")
@@ -31,7 +29,7 @@ class McpTool:
         return arguments
 
     async def invoke(self, key: str, arguments: Mapping[str, object]) -> Result:
-        value = await self._route.call(self._name, arguments)
+        value = await self._route.call(tool_name=self._name, arguments=arguments)
         return Result(
             "success" if value.success else "error",
             (ContentPart("text", value.output),),

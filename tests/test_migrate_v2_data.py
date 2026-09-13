@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from bootstrap.workspace_lock import WorkspaceInstanceLock
+from scripts._workspace_support import WorkspaceInstanceLock
 from scripts import migrate_v2_data as migration
 
 
