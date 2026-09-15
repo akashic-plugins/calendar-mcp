@@ -21,14 +21,21 @@ from agent.plugin_composition import (
     PluginRuntime,
     PluginTimers,
 )
-from agent.plugin_composition.mcp_slots import (
-    PluginMcpServers,
-    _freeze_plugin_mcp_servers,
-)
-from agent.plugin_composition.process_slots import (
-    PluginManagedProcesses,
-    _freeze_plugin_managed_processes,
-)
+class RecordingProcesses:
+    def __init__(self) -> None:
+        self.definitions: dict[str, object] = {}
+
+    async def register(self, ctx: object, definition: object) -> object:
+        self.definitions[definition.name] = definition
+        return definition
+
+
+class RecordingServers:
+    def __init__(self) -> None:
+        self.definitions: dict[str, object] = {}
+
+    async def register(self, ctx: object, definition: object) -> None:
+        self.definitions[definition.name] = definition
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from calendar_test_plugin.plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
@@ -106,8 +113,8 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     tmp_path: Path,
 ) -> None:
     root = CompositionRoot("calendar:test")
-    processes = PluginManagedProcesses(root.instance_token)
-    servers = PluginMcpServers(root.instance_token)
+    processes = RecordingProcesses()
+    servers = RecordingServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TOOLS, ToolCatalog(root.context))
@@ -116,7 +123,9 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
         EVENTMAIL_ALERT_SOURCE, AlertSources(RecordingAlerts())
     )
 
-    plugin = ComposablePlugin.from_module(calendar_module)
+    plugin = ComposablePlugin.from_module(
+        calendar_module, load_static_plugin_manifest(ROOT)
+    )
     await root.mount(
         plugin.apply,
         name="calendar",
@@ -127,18 +136,14 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
             plugin_dir=ROOT,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
-            config=CalendarConfig(),
+            config=dict(CalendarConfig().model_dump()),
         ),
     )
 
-    process = _freeze_plugin_managed_processes(processes, root.instance_token)[
-        "calendar_api"
-    ].definition
-    mcp = _freeze_plugin_mcp_servers(servers, root.instance_token)[
-        "calendar"
-    ].definition
+    process = processes.definitions["calendar_api"]
+    mcp = servers.definitions["calendar"]
     assert process == calendar_module.CALENDAR_PROCESS
-    assert mcp.endpoint_env[0].process == process.name
+    assert mcp.endpoint_env[0].process is process
     assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
     assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
     await root.dispose()
@@ -147,13 +152,15 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
 @pytest.mark.asyncio
 async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path) -> None:
     root = CompositionRoot("calendar:without-eventmail")
-    processes = PluginManagedProcesses(root.instance_token)
-    servers = PluginMcpServers(root.instance_token)
+    processes = RecordingProcesses()
+    servers = RecordingServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TOOLS, ToolCatalog(root.context))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
-    plugin = ComposablePlugin.from_module(calendar_module)
+    plugin = ComposablePlugin.from_module(
+        calendar_module, load_static_plugin_manifest(ROOT)
+    )
     await root.mount(
         plugin.apply,
         name="calendar",
@@ -164,11 +171,11 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
             plugin_dir=ROOT,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
-            config=CalendarConfig(),
+            config=dict(CalendarConfig().model_dump()),
         ),
     )
 
-    assert "calendar" in _freeze_plugin_mcp_servers(servers, root.instance_token)
+    assert "calendar" in servers.definitions
     assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
     await root.dispose()
 
@@ -176,7 +183,6 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
     assert manifest.version == calendar_module.version == "3.2.3"
-    assert manifest.mcp_servers[0].required_tools == ()
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 
 

@@ -261,20 +261,19 @@ class CalendarSourceRuntime:
         _ = await self._api.commit(batch_id)
 
 
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context) -> None:
     """Register Calendar capabilities and bind one formal-only Alert runtime."""
 
-    if not isinstance(config, CalendarConfig):
-        raise TypeError("calendar config 必须是 CalendarConfig")
+    config = CalendarConfig.model_validate(ctx.config)
 
     # 1. One process declaration owns both the launched port and loopback client fact.
-    await ctx.require(MANAGED_PROCESSES).register(ctx, CALENDAR_PROCESS)
+    calendar_process = await ctx.require(MANAGED_PROCESSES).register(ctx, CALENDAR_PROCESS)
     await ctx.require(MCP_SERVERS).register(
         ctx,
         McpServerDefinition(
             name="calendar",
             command=("python", "mcp/run_mcp.py"),
-            endpoint_env=(EndpointEnv("PORT", CALENDAR_PROCESS.name),),
+            endpoint_env=(EndpointEnv("PORT", calendar_process),),
             candidate_env={
                 "CALENDAR_BACKEND": "recording",
                 "GOOGLE_CLIENT_ID": "",

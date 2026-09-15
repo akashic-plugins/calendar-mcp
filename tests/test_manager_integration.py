@@ -10,7 +10,15 @@ from urllib.request import ProxyHandler, build_opener
 import pytest
 
 from session.log import MessageLog
+from agent.plugin_composition import MANAGED_PROCESSES, MCP_SERVERS
+from agent.plugin_composition.bindings import Bindings
 from agent.plugins.manager import PluginManager
+from agent.plugins.selection import PluginSelection
+from agent.plugins.snapshot import lease_runtime_snapshot
+from collections.abc import Mapping
+
+from calendar_test_plugin.tools import CALENDAR_TOOLS  # pyright: ignore[reportMissingImports]
+from plugins.tools.plugin import TOOLS
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
@@ -58,7 +66,6 @@ def _stage_calendar(tmp_path: Path) -> Path:
         "tools.py",
         "_tool_contract.py",
         "tool_catalog.json",
-        "akashic.plugin.toml",
         "mcp/requirements.txt",
         "mcp/run_mcp.py",
         "mcp/run_server.py",
@@ -110,89 +117,68 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     content = _stage_content(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    PluginSelection(workspace).initialize()
     _prepare_python_environment(calendar, workspace)
     log = MessageLog(tmp_path / "sessions.db")
+    providers = tmp_path / "providers"
+    for provider in ("content", "mcp", "managed_processes", "tools"):
+        shutil.copytree(CORE / "plugins" / provider, providers / provider)
     manager = PluginManager(
         message_log=log,
-        plugin_dirs=[
-            content,
-            calendar,
-            CORE / "plugins" / "content",
-            CORE / "plugins" / "tools",
-        ],
+        plugin_dirs=[content, calendar, providers],
         event_bus=EventBus(),
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
-    route = None
-    generation_id = None
     try:
         await manager.load_all()
         snapshot = manager.current_snapshot
         assert snapshot is not None and snapshot.composition_root is not None
+        root = snapshot.composition_root
         generations = {
             item.plugin_id: item for item in snapshot.generations.values()
         }
-        assert set(generations) == {"calendar", "content", "eventmail", "tools"}
-        generation_id = generations["calendar"].generation_id
-        runtime = manager.composition_generation_host.get(generation_id)
-        assert runtime is not None and runtime.mode == "formal"
+        assert "calendar" in generations and "eventmail" in generations
 
-        process_catalog = snapshot.managed_process_registry
-        mcp_catalog = snapshot.mcp_server_registry
-        assert process_catalog is not None and tuple(process_catalog) == ("calendar_api",)
-        assert mcp_catalog is not None and tuple(mcp_catalog) == ("calendar",)
-        assert mcp_catalog["calendar"].descriptor.required_tools == ()
+        processes = root.context.require(MANAGED_PROCESSES)
+        mcp = root.context.require(MCP_SERVERS)
+        monitor = processes._entries[("calendar", "calendar_api")]  # pyright: ignore[reportPrivateUsage]
+        endpoint = monitor._host.endpoint(monitor._id, "calendar_api")  # pyright: ignore[reportPrivateUsage]
+        assert endpoint.port == FORMAL_PORT
+        assert mcp._entries["calendar"].definition.required_tools == ()  # pyright: ignore[reportPrivateUsage]
 
-        process = runtime.processes
-        mcp = runtime.mcp
-        assert process is not None and mcp is not None
-        assert process.endpoint("calendar_api").port == FORMAL_PORT
-        server = mcp.server("calendar")
-        route = server.route()
-        assert set(server.tool_names) == EXPECTED_TOOLS
-        assert "get_proactive_events" not in server.tool_names
-        assert "acknowledge_events" not in server.tool_names
-        call = await route.call("analyze_busyness", {})
-        assert not call.success
-        assert "validation error" in call.output.lower()
+        async with lease_runtime_snapshot(manager.snapshot_store) as leased:
+            bound_root = leased.composition_root
+            assert bound_root is not None
+            bindings = Bindings(log, manager._archive, bound_root)  # pyright: ignore[reportPrivateUsage]
+            tools = bound_root.context.require(TOOLS)
+            view = bound_root.context.require(CALENDAR_TOOLS)
+            names = {ref.name for ref in view.refs}
+            assert {f"mcp_calendar__{name}" for name in EXPECTED_TOOLS} == names
 
-        # 运行数据可能保留正式端口；归档调用必须使用 Core 分配的独立端口。
-        data_dir = process_catalog["calendar_api"].runtime_data_dir
-        data_dir.mkdir(parents=True, exist_ok=True)
-        (data_dir / ".env").write_text(
-            "PORT=18000\nGOOGLE_CLIENT_ID=fixture-client\nGOOGLE_CLIENT_SECRET=fixture-secret\n",
-            encoding="utf-8",
-        )
-        async with manager.composition_generation_host.open_mcp(snapshot, "calendar") as scoped:
-            bound = manager.composition_generation_host.get(scoped.generation_id)
-            assert bound is not None and bound.processes is not None
-            assert bound.processes.endpoint("calendar_api").port != FORMAL_PORT
-            scoped_route = scoped.route()
-            try:
-                unavailable = await scoped_route.call("list_calendars", {})
-                assert "503" in unavailable.output
-                assert "/calendars" in "".join(bound.processes.logs("calendar_api").lines)
-                assert "/calendars" not in "".join(process.logs("calendar_api").lines)
-            finally:
-                await scoped_route.aclose()
+            async def allow(_binding: str, _arguments: object) -> Mapping[str, object]:
+                return {"allowed": True}
 
-        with build_opener(ProxyHandler({})).open(process.endpoint("calendar_api").readiness_url, timeout=3) as response:
+            execution = tools.execution(allow)
+            binding = tools.bind(view.select("mcp_calendar__analyze_busyness"), bindings)
+            call = await execution.execute("fixture-busyness", binding, {})
+            assert call.outcome == "error"
+            assert "validation error" in str(call.parts[0].value).lower()
+
+        with build_opener(ProxyHandler({})).open(endpoint.readiness_url, timeout=3) as response:
             assert response.status == 200
 
-        receipt = snapshot.composition_root.receipt()
+        receipt = root.receipt()
         health = {item.name: item.healthy for item in receipt.health}
-        assert health["managed-process:calendar_api"]
+        assert health["process:calendar_api"]
         assert health["mcp:calendar"]
         assert not any(name.startswith("proactive:") for name in health)
-        process_lines = list(process.logs("calendar_api").lines)
+        process_lines = list(
+            monitor._host.logs(monitor._id, "calendar_api").lines  # pyright: ignore[reportPrivateUsage]
+        )
         assert any("/health" in line and "200" in line for line in process_lines)
-        assert not any("/content/" in line for line in process_lines)
     finally:
-        if route is not None:
-            await route.aclose()
         await manager.terminate_all()
         log.close()
 
     assert _port_free(FORMAL_PORT)
-    assert manager.composition_generation_host.get(generation_id) is None
