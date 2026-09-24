@@ -62,6 +62,9 @@ class RecordingAlerts:
     def status(self, *, event_id: str) -> str | None:
         return self.statuses.get(event_id)
 
+    def close(self) -> None:
+        return None
+
 
 class AlertSources:
     def __init__(self, alerts: RecordingAlerts) -> None:
