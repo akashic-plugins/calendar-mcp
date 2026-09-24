@@ -21,6 +21,7 @@ from agent.plugin_composition import (
     PluginRuntime,
     PluginTimers,
 )
+from agent.plugin_composition.tasks import TaskAdmission
 class RecordingProcesses:
     def __init__(self) -> None:
         self.definitions: dict[str, object] = {}
@@ -117,7 +118,7 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     servers = RecordingServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
+    await root.context.provide(TOOLS, ToolCatalog(root.context, cast(TaskAdmission, None)))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
     _ = await root.context.provide(
         EVENTMAIL_ALERT_SOURCE, AlertSources(RecordingAlerts())
@@ -156,7 +157,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
     servers = RecordingServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
+    await root.context.provide(TOOLS, ToolCatalog(root.context, cast(TaskAdmission, None)))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
     plugin = ComposablePlugin.from_module(
         calendar_module, load_static_plugin_manifest(ROOT)

@@ -11,10 +11,9 @@ import pytest
 
 from session.log import MessageLog
 from agent.plugin_composition import MANAGED_PROCESSES, MCP_SERVERS
-from agent.plugin_composition.bindings import Bindings
+from agent.plugin_composition.bindings import BINDINGS
 from agent.plugins.manager import PluginManager
 from agent.plugins.selection import PluginSelection
-from agent.plugins.snapshot import lease_runtime_snapshot
 from collections.abc import Mapping
 
 from calendar_test_plugin.tools import CALENDAR_TOOLS  # pyright: ignore[reportMissingImports]
@@ -132,13 +131,10 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     )
     try:
         await manager.load_all()
-        snapshot = manager.current_snapshot
-        assert snapshot is not None and snapshot.composition_root is not None
-        root = snapshot.composition_root
-        generations = {
-            item.plugin_id: item for item in snapshot.generations.values()
-        }
-        assert "calendar" in generations and "eventmail" in generations
+        root = manager.live_root
+        assert root is not None
+        assert manager.generation("calendar") is not None
+        assert manager.generation("eventmail") is not None
 
         processes = root.context.require(MANAGED_PROCESSES)
         mcp = root.context.require(MCP_SERVERS)
@@ -147,18 +143,18 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         assert endpoint.port == FORMAL_PORT
         assert mcp._entries["calendar"].definition.required_tools == ()  # pyright: ignore[reportPrivateUsage]
 
-        async with lease_runtime_snapshot(manager.snapshot_store) as leased:
-            bound_root = leased.composition_root
-            assert bound_root is not None
-            bindings = Bindings(log, manager._archive, bound_root)  # pyright: ignore[reportPrivateUsage]
-            tools = bound_root.context.require(TOOLS)
-            view = bound_root.context.require(CALENDAR_TOOLS)
-            names = {ref.name for ref in view.refs}
-            assert {f"mcp_calendar__{name}" for name in EXPECTED_TOOLS} == names
+        bindings = root.context.require(BINDINGS)
+        tools = root.context.require(TOOLS)
+        view = root.context.require(CALENDAR_TOOLS)
+        names = {ref.name for ref in view.refs}
+        assert {f"mcp_calendar__{name}" for name in EXPECTED_TOOLS} == names
 
-            async def allow(_binding: str, _arguments: object) -> Mapping[str, object]:
-                return {"allowed": True}
+        async def allow(_binding: str, _arguments: object) -> Mapping[str, object]:
+            return {"allowed": True}
 
+        tool_generation = manager.generation("tools")
+        assert tool_generation is not None and tool_generation.fiber is not None
+        async with tool_generation.fiber.context.runtime_scope():
             execution = tools.execution(allow)
             binding = tools.bind(view.select("mcp_calendar__analyze_busyness"), bindings)
             call = await execution.execute("fixture-busyness", binding, {})
