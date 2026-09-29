@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from agent.plugin_composition import MCP_SERVERS
-from agent.plugins.mcp_generation_host import McpCallResult
+from agent.plugin_composition.mcp_slots import McpCallResult
 from plugins.tools.plugin import TOOLS, ToolRef, ToolView
 from calendar_test_plugin.tools import register_tools
 
@@ -66,6 +66,7 @@ async def test_discovery_is_lazy_and_calls_keep_route_errors():
     assert not opened
     assert not calls
     assert len(registrations) == len(records)
+    assert all("risk" not in record and "search_hint" not in record for record in registrations.values())
 
     # 每个 opener 必须固定自己的目标，不能都指向循环的最后一项。
     for item in records:

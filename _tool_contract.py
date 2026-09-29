@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from agent.plugin_composition import Context, ServiceKey
 from agent.plugin_contracts import CallRef, ContentPart, Message
@@ -39,7 +39,7 @@ class BoundTool(Protocol):
 
     async def prepare(
         self,
-        arguments: Mapping[str, object],
+        arguments: Mapping[str, Any],
         source: CallSource | None = None,
     ) -> Mapping[str, object] | str: ...
 
@@ -83,8 +83,6 @@ class ToolCatalog(Protocol):
         capture: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
         public: bool = True,
         idempotent: bool = False,
-        risk: Literal["read-only", "read-write", "external-side-effect"] = "read-write",
-        search_hint: str | None = None,
     ) -> ToolRef: ...
 
     def view(self, *refs: ToolRef) -> ToolView: ...

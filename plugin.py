@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 class BoundAlertSource(Protocol):
+    def close(self) -> None: ...
+
     def report(
         self,
         *,
@@ -97,7 +99,6 @@ api_version = 3
 name = "calendar"
 version = "3.2.3"
 desc = "Google Calendar MCP and durable Alert source plugin"
-Config = CalendarConfig
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
 
@@ -261,20 +262,18 @@ class CalendarSourceRuntime:
         _ = await self._api.commit(batch_id)
 
 
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context) -> None:
     """Register Calendar capabilities and bind one formal-only Alert runtime."""
-
-    if not isinstance(config, CalendarConfig):
-        raise TypeError("calendar config 必须是 CalendarConfig")
+    config = CalendarConfig.model_validate(ctx.config)
 
     # 1. One process declaration owns both the launched port and loopback client fact.
-    await ctx.require(MANAGED_PROCESSES).register(ctx, CALENDAR_PROCESS)
+    calendar_process = await ctx.require(MANAGED_PROCESSES).register(ctx, CALENDAR_PROCESS)
     await ctx.require(MCP_SERVERS).register(
         ctx,
         McpServerDefinition(
             name="calendar",
             command=("python", "mcp/run_mcp.py"),
-            endpoint_env=(EndpointEnv("PORT", CALENDAR_PROCESS.name),),
+            endpoint_env=(EndpointEnv("PORT", calendar_process),),
             candidate_env={
                 "CALENDAR_BACKEND": "recording",
                 "GOOGLE_CLIENT_ID": "",
@@ -288,17 +287,21 @@ async def apply(ctx: Context, config: object) -> None:
 
     # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
     async def apply_eventmail(source_ctx: Context) -> None:
+        alerts = source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar")
+        _ = await source_ctx.effect(
+            lambda: alerts.close,
+            label="calendar-alert-source-binding",
+        )
         runtime = CalendarSourceRuntime(
             source_ctx.require(TIMERS),
-            source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar"),
+            alerts,
             CalendarContentApi(CALENDAR_PROCESS.formal_port),
             timedelta(seconds=config.content.poll_interval_seconds),
         )
-
-        def setup() -> object:
-            return runtime.close
-
-        _ = await source_ctx.effect(setup, label="calendar-alert-runtime")
+        _ = await source_ctx.effect(
+            lambda: runtime.close,
+            label="calendar-alert-runtime",
+        )
         _ = await source_ctx.on(
             RUNTIME_STARTED, lambda _event: runtime.start(source_ctx)
         )
