@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 
 class BoundAlertSource(Protocol):
+    def close(self) -> None: ...
+
     def report(
         self,
         *,
@@ -285,17 +287,21 @@ async def apply(ctx: Context) -> None:
 
     # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
     async def apply_eventmail(source_ctx: Context) -> None:
+        alerts = source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar")
+        _ = await source_ctx.effect(
+            lambda: alerts.close,
+            label="calendar-alert-source-binding",
+        )
         runtime = CalendarSourceRuntime(
             source_ctx.require(TIMERS),
-            source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar"),
+            alerts,
             CalendarContentApi(CALENDAR_PROCESS.formal_port),
             timedelta(seconds=config.content.poll_interval_seconds),
         )
-
-        def setup() -> object:
-            return runtime.close
-
-        _ = await source_ctx.effect(setup, label="calendar-alert-runtime")
+        _ = await source_ctx.effect(
+            lambda: runtime.close,
+            label="calendar-alert-runtime",
+        )
         _ = await source_ctx.on(
             RUNTIME_STARTED, lambda _event: runtime.start(source_ctx)
         )

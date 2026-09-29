@@ -17,18 +17,15 @@ from agent.plugin_composition import (
     MANAGED_PROCESSES,
     MCP_SERVERS,
     TIMERS,
+    Context,
     CompositionRoot,
+    Fiber,
     PluginRuntime,
     PluginTimers,
 )
-from agent.plugin_composition.mcp_slots import (
-    PluginMcpServers,
-    _freeze_plugin_mcp_servers,
-)
-from agent.plugin_composition.process_slots import (
-    PluginManagedProcesses,
-    _freeze_plugin_managed_processes,
-)
+from agent.plugin_composition.tasks import TASKS, PluginTasks
+from agent.plugin_composition.mcp_slots import McpServerDefinition
+from agent.plugin_composition.process_slots import ManagedProcessDefinition
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from calendar_test_plugin.plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
@@ -39,11 +36,74 @@ ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 8, 23, tzinfo=UTC)
 
 
+class _RecordingProcessHandle:
+    def __init__(self, definition: ManagedProcessDefinition) -> None:
+        self.definition = definition
+
+    def port(self, _ctx: object) -> int:
+        return self.definition.formal_port
+
+
+class _RecordingProcesses:
+    """Capture declarations; manager integration tests exercise the real provider."""
+
+    def __init__(self) -> None:
+        self.definitions: dict[str, ManagedProcessDefinition] = {}
+
+    async def register(
+        self, _ctx: object, definition: ManagedProcessDefinition,
+    ) -> _RecordingProcessHandle:
+        self.definitions[definition.name] = definition
+        return _RecordingProcessHandle(definition)
+
+
+class _RecordingMcpServers:
+    """Capture declarations; manager integration tests exercise the real provider."""
+
+    def __init__(self) -> None:
+        self.definitions: dict[str, McpServerDefinition] = {}
+
+    async def register(self, _ctx: object, definition: McpServerDefinition) -> None:
+        self.definitions[definition.name] = definition
+
+
+async def _mount_tools(
+    root: CompositionRoot, tmp_path: Path,
+) -> tuple[PluginTasks, Fiber]:
+    """Provide the real tools owner with its required task admission."""
+
+    tasks = PluginTasks()
+    await root.context.provide(TASKS, tasks)
+
+    async def apply(ctx: Context) -> None:
+        catalog = ToolCatalog(ctx, ctx.require(TASKS).open(ctx))
+        _ = await ctx.provide(TOOLS, catalog)
+
+    fiber = await root.mount(
+        apply,
+        name="tools-provider",
+        inject=(TASKS,),
+        runtime=PluginRuntime(
+            plugin_id="tools-provider",
+            generation_id="tools-provider:test",
+            plugin_dir=ROOT,
+            data_dir=tmp_path / "tools-data",
+            workspace=tmp_path / "workspace",
+            config={},
+        ),
+    )
+    return tasks, fiber
+
+
 class RecordingAlerts:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
         self.statuses: dict[str, str] = {}
         self.failure: Exception | None = None
+        self.closed = 0
+
+    def close(self) -> None:
+        self.closed += 1
 
     def report(self, **kwargs: object) -> Mapping[str, object]:
         if self.failure is not None:
@@ -106,77 +166,89 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     tmp_path: Path,
 ) -> None:
     root = CompositionRoot("calendar:test")
-    processes = PluginManagedProcesses(root.instance_token)
-    servers = PluginMcpServers(root.instance_token)
+    processes = _RecordingProcesses()
+    servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    alerts = RecordingAlerts()
     _ = await root.context.provide(
-        EVENTMAIL_ALERT_SOURCE, AlertSources(RecordingAlerts())
+        EVENTMAIL_ALERT_SOURCE, AlertSources(alerts)
     )
 
-    plugin = ComposablePlugin.from_module(calendar_module)
-    await root.mount(
-        plugin.apply,
-        name="calendar",
-        inject=plugin.inject,
-        runtime=PluginRuntime(
-            plugin_id="calendar",
-            generation_id="calendar:test",
-            plugin_dir=ROOT,
-            data_dir=tmp_path / "plugin-data",
-            workspace=tmp_path / "workspace",
-            config=CalendarConfig(),
-        ),
-    )
+    tasks, tools_fiber = await _mount_tools(root, tmp_path)
+    try:
+        plugin = ComposablePlugin.from_module(
+            calendar_module, load_static_plugin_manifest(ROOT)
+        )
+        await root.mount(
+            plugin.apply,
+            name="calendar",
+            inject=plugin.inject,
+            runtime=PluginRuntime(
+                plugin_id="calendar",
+                generation_id="calendar:test",
+                plugin_dir=ROOT,
+                data_dir=tmp_path / "plugin-data",
+                workspace=tmp_path / "workspace",
+                config=CalendarConfig(),
+            ),
+        )
 
-    process = _freeze_plugin_managed_processes(processes, root.instance_token)[
-        "calendar_api"
-    ].definition
-    mcp = _freeze_plugin_mcp_servers(servers, root.instance_token)[
-        "calendar"
-    ].definition
-    assert process == calendar_module.CALENDAR_PROCESS
-    assert mcp.endpoint_env[0].process == process.name
-    assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
-    assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
-    await root.dispose()
+        process = processes.definitions["calendar_api"]
+        mcp = servers.definitions["calendar"]
+        assert process == calendar_module.CALENDAR_PROCESS
+        assert mcp.endpoint_env[0].process.port(root.context) == process.formal_port
+        assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
+        assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
+    finally:
+        await tasks.close()
+        await tools_fiber.dispose()
+        await root.dispose()
+    assert alerts.closed == 1
 
 
 @pytest.mark.asyncio
 async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path) -> None:
     root = CompositionRoot("calendar:without-eventmail")
-    processes = PluginManagedProcesses(root.instance_token)
-    servers = PluginMcpServers(root.instance_token)
+    processes = _RecordingProcesses()
+    servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
-    plugin = ComposablePlugin.from_module(calendar_module)
-    await root.mount(
-        plugin.apply,
-        name="calendar",
-        inject=plugin.inject,
-        runtime=PluginRuntime(
-            plugin_id="calendar",
-            generation_id="calendar:without-eventmail",
-            plugin_dir=ROOT,
-            data_dir=tmp_path / "plugin-data",
-            workspace=tmp_path / "workspace",
-            config=CalendarConfig(),
-        ),
-    )
+    tasks, tools_fiber = await _mount_tools(root, tmp_path)
+    try:
+        plugin = ComposablePlugin.from_module(
+            calendar_module, load_static_plugin_manifest(ROOT)
+        )
+        await root.mount(
+            plugin.apply,
+            name="calendar",
+            inject=plugin.inject,
+            runtime=PluginRuntime(
+                plugin_id="calendar",
+                generation_id="calendar:without-eventmail",
+                plugin_dir=ROOT,
+                data_dir=tmp_path / "plugin-data",
+                workspace=tmp_path / "workspace",
+                config=CalendarConfig(),
+            ),
+        )
 
-    assert "calendar" in _freeze_plugin_mcp_servers(servers, root.instance_token)
-    assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
-    await root.dispose()
+        assert "calendar" in servers.definitions
+        assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
+    finally:
+        await tasks.close()
+        await tools_fiber.dispose()
+        await root.dispose()
 
 
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
+    assert manifest.name == "calendar"
     assert manifest.version == calendar_module.version == "3.2.3"
-    assert manifest.mcp_servers[0].required_tools == ()
+    assert manifest.api_version == 3
+    assert manifest.requirements == ("mcp/requirements.txt",)
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 
 

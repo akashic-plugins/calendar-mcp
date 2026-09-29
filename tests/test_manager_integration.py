@@ -4,14 +4,19 @@ import os
 import json
 import shutil
 import socket
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
-from urllib.request import ProxyHandler, build_opener
 
 import pytest
 
+import agent.plugins.host as plugin_host_module
+from agent.control.timer import TimerReceipt, TimerStatus
 from session.log import MessageLog
+from agent.plugin_composition import MCP_SERVERS
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
+from agent.plugins.selection import PluginSelection
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 
@@ -35,6 +40,52 @@ EXPECTED_TOOLS = frozenset(
         "update_event",
     }
 )
+
+
+class _TimerHandle:
+    def __init__(self, timer_id: str, deadline: datetime, now: datetime) -> None:
+        self._id = timer_id
+        self.deadline = deadline
+        self.now = now
+        self.future: asyncio.Future[TimerReceipt] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    async def result(self) -> TimerReceipt:
+        return await asyncio.shield(self.future)
+
+    async def cancel(self) -> TimerReceipt:
+        if not self.future.done():
+            self.future.set_result(
+                TimerReceipt(self.id, self.deadline, self.now, TimerStatus.CANCELLED)
+            )
+        return await self.future
+
+    async def cleanup(self) -> None:
+        _ = await self.cancel()
+
+
+class _Timer:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+        self.handles: list[_TimerHandle] = []
+
+    def schedule(self, deadline: datetime) -> _TimerHandle:
+        handle = _TimerHandle(f"timer:{len(self.handles)}", deadline, self.now)
+        self.handles.append(handle)
+        return handle
+
+
+async def _eventually(predicate) -> None:
+    for _ in range(300):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition did not settle")
 
 
 def _port_free(port: int) -> bool:
@@ -96,7 +147,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Boot the real loader/process/MCP boundary without starting the poll lifecycle."""
+    """Boot the real loader, MCP session, Alert timer, and local replacement."""
 
     runtime = _fixture_runtime()
     runtime_python = runtime / "bin" / "python"
@@ -106,10 +157,20 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     monkeypatch.setenv(
         "PATH", f"{runtime / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
     )
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    timers: list[_Timer] = []
+
+    def timer_factory() -> _Timer:
+        timer = _Timer(now)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(plugin_host_module, "AsyncioOneShotTimer", timer_factory)
     calendar = _stage_calendar(tmp_path)
     content = _stage_content(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    PluginSelection(workspace).initialize()
     _prepare_python_environment(calendar, workspace)
     log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
@@ -117,82 +178,75 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         plugin_dirs=[
             content,
             calendar,
-            CORE / "plugins" / "content",
-            CORE / "plugins" / "tools",
+            *(CORE / "plugins" / name for name in (
+                "content", "tools", "mcp", "managed_processes",
+            )),
         ],
         event_bus=EventBus(),
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
-    route = None
-    generation_id = None
     try:
         await manager.load_all()
-        snapshot = manager.current_snapshot
-        assert snapshot is not None and snapshot.composition_root is not None
-        generations = {
-            item.plugin_id: item for item in snapshot.generations.values()
-        }
-        assert set(generations) == {"calendar", "content", "eventmail", "tools"}
-        generation_id = generations["calendar"].generation_id
-        runtime = manager.composition_generation_host.get(generation_id)
-        assert runtime is not None and runtime.mode == "formal"
+        root = manager.live_root
+        calendar_generation = manager.generation("calendar")
+        assert root is not None and calendar_generation is not None
+        assert calendar_generation.fiber is not None
+        await manager.start_runtime()
+        await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
+        formal_timer = next(timer for timer in timers if timer.handles)
 
-        process_catalog = snapshot.managed_process_registry
-        mcp_catalog = snapshot.mcp_server_registry
-        assert process_catalog is not None and tuple(process_catalog) == ("calendar_api",)
-        assert mcp_catalog is not None and tuple(mcp_catalog) == ("calendar",)
-        assert mcp_catalog["calendar"].descriptor.required_tools == ()
-
-        process = runtime.processes
-        mcp = runtime.mcp
-        assert process is not None and mcp is not None
-        assert process.endpoint("calendar_api").port == FORMAL_PORT
-        server = mcp.server("calendar")
-        route = server.route()
-        assert set(server.tool_names) == EXPECTED_TOOLS
-        assert "get_proactive_events" not in server.tool_names
-        assert "acknowledge_events" not in server.tool_names
-        call = await route.call("analyze_busyness", {})
-        assert not call.success
-        assert "validation error" in call.output.lower()
-
-        # 运行数据可能保留正式端口；归档调用必须使用 Core 分配的独立端口。
-        data_dir = process_catalog["calendar_api"].runtime_data_dir
-        data_dir.mkdir(parents=True, exist_ok=True)
-        (data_dir / ".env").write_text(
+        # Runtime input belongs to Calendar's live generation; the actual
+        # MCP session borrows its endpoint process below.
+        calendar_generation.data_dir.mkdir(parents=True, exist_ok=True)
+        (calendar_generation.data_dir / ".env").write_text(
             "PORT=18000\nGOOGLE_CLIENT_ID=fixture-client\nGOOGLE_CLIENT_SECRET=fixture-secret\n",
             encoding="utf-8",
         )
-        async with manager.composition_generation_host.open_mcp(snapshot, "calendar") as scoped:
-            bound = manager.composition_generation_host.get(scoped.generation_id)
-            assert bound is not None and bound.processes is not None
-            assert bound.processes.endpoint("calendar_api").port != FORMAL_PORT
-            scoped_route = scoped.route()
-            try:
-                unavailable = await scoped_route.call("list_calendars", {})
+
+        servers = root.context.require(MCP_SERVERS)
+        assert servers.catalog() == [
+            {"owner_id": "calendar", "name": "calendar", "status": "declared"}
+        ]
+        async with servers.open(calendar_generation.fiber.context, "calendar") as server:
+            assert set(server.tool_names) == EXPECTED_TOOLS
+            assert "get_proactive_events" not in server.tool_names
+            assert "acknowledge_events" not in server.tool_names
+            async with server.route() as route:
+                call = await route.call("analyze_busyness", {})
+                assert not call.success
+                assert "validation error" in call.output.lower()
+                unavailable = await route.call("list_calendars", {})
                 assert "503" in unavailable.output
-                assert "/calendars" in "".join(bound.processes.logs("calendar_api").lines)
-                assert "/calendars" not in "".join(process.logs("calendar_api").lines)
-            finally:
-                await scoped_route.aclose()
 
-        with build_opener(ProxyHandler({})).open(process.endpoint("calendar_api").readiness_url, timeout=3) as response:
-            assert response.status == 200
-
-        receipt = snapshot.composition_root.receipt()
+        receipt = root.receipt()
         health = {item.name: item.healthy for item in receipt.health}
-        assert health["managed-process:calendar_api"]
+        assert health["process:calendar_api"]
         assert health["mcp:calendar"]
-        assert not any(name.startswith("proactive:") for name in health)
-        process_lines = list(process.logs("calendar_api").lines)
-        assert any("/health" in line and "200" in line for line in process_lines)
-        assert not any("/content/" in line for line in process_lines)
+        assert not any("proactive" in item.name for item in receipt.health)
+
+        # The old Alert binding must release during local replacement before
+        # the new Calendar source may own the same EventMail source ID.
+        with (calendar / "plugin.py").open("a", encoding="utf-8") as handle:
+            handle.write("\n# local replacement fixture revision\n")
+        _prepare_python_environment(calendar, workspace)
+        result = await manager.reconcile_changed()
+        assert any(row["publication_state"] == "active" for row in result)
+        assert manager.generation("calendar") is not calendar_generation
+        assert calendar_generation.scope.closed
+        assert manager.live_root is root
+        await _eventually(lambda: len(formal_timer.handles) == 2)
+        assert (await formal_timer.handles[0].result()).status is TimerStatus.CANCELLED
+        active = [
+            handle
+            for timer in timers
+            for handle in timer.handles
+            if not handle.future.done()
+        ]
+        assert len(active) == 1
     finally:
-        if route is not None:
-            await route.aclose()
         await manager.terminate_all()
         log.close()
 
     assert _port_free(FORMAL_PORT)
-    assert manager.composition_generation_host.get(generation_id) is None
+    assert all(handle.future.done() for timer in timers for handle in timer.handles)
