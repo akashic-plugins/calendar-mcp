@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class BoundAlertSource(Protocol):
     def close(self) -> None: ...
 
-    def report(
+    async def report(
         self,
         *,
         event_id: str,
@@ -46,7 +46,7 @@ class BoundAlertSource(Protocol):
         expires_at: datetime | None = None,
     ) -> Mapping[str, object]: ...
 
-    def status(self, *, event_id: str) -> str | None: ...
+    async def status(self, *, event_id: str) -> str | None: ...
 
 
 class AlertSourceServices(Protocol):
@@ -54,7 +54,7 @@ class AlertSourceServices(Protocol):
 
 
 EVENTMAIL_ALERT_SOURCE = ServiceKey[AlertSourceServices](
-    "eventmail.alert_source.v1"
+    "eventmail.alert_source.v2"
 )
 
 
@@ -228,7 +228,7 @@ class CalendarSourceRuntime:
         # 1. Submitted Calendar rows remain queryable until Wake reaches a terminal state.
         for item in await self._api.pending():
             event_id, payload, _expires_at = _alert_item(item)
-            if self._alerts.status(event_id=event_id) in {
+            if await self._alerts.status(event_id=event_id) in {
                 "delivered",
                 "skipped",
                 "expired",
@@ -251,7 +251,7 @@ class CalendarSourceRuntime:
             if not isinstance(item, Mapping):
                 raise RuntimeError("calendar Alert batch item 不是对象")
             event_id, payload, expires_at = _alert_item(item)
-            _ = self._alerts.report(
+            _ = await self._alerts.report(
                 event_id=event_id,
                 payload=payload,
                 observed_at=now,
