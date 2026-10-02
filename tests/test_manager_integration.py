@@ -109,7 +109,6 @@ def _stage_calendar(tmp_path: Path) -> Path:
         "tools.py",
         "_tool_contract.py",
         "tool_catalog.json",
-        "akashic.plugin.toml",
         "mcp/requirements.txt",
         "mcp/run_mcp.py",
         "mcp/run_server.py",
