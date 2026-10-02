@@ -105,13 +105,13 @@ class RecordingAlerts:
     def close(self) -> None:
         self.closed += 1
 
-    def report(self, **kwargs: object) -> Mapping[str, object]:
+    async def report(self, **kwargs: object) -> Mapping[str, object]:
         if self.failure is not None:
             raise self.failure
         self.reports.append(dict(kwargs))
         return {"accepted": True}
 
-    def status(self, *, event_id: str) -> str | None:
+    async def status(self, *, event_id: str) -> str | None:
         return self.statuses.get(event_id)
 
 
