@@ -10,15 +10,14 @@ from pathlib import Path
 
 import pytest
 
-import agent.plugins.host as plugin_host_module
-from agent.control.timer import TimerReceipt, TimerStatus
+from agent.plugins.importer import FreshSourceLoader
+from plugins.timer.contract import TimerReceipt, TimerStatus
 from session.log import MessageLog
-from agent.plugin_composition import MCP_SERVERS
+from plugins.mcp.contract import MCP_SERVERS
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.selection import PluginSelection
 from agent.plugins.static_manifest import load_static_plugin_manifest
-from bus.event_bus import EventBus
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +77,9 @@ class _Timer:
         handle = _TimerHandle(f"timer:{len(self.handles)}", deadline, self.now)
         self.handles.append(handle)
         return handle
+
+    async def close(self) -> None:
+        await asyncio.gather(*(handle.cleanup() for handle in self.handles))
 
 
 async def _eventually(predicate) -> None:
@@ -164,7 +166,16 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         timers.append(timer)
         return timer
 
-    monkeypatch.setattr(plugin_host_module, "AsyncioOneShotTimer", timer_factory)
+    # Timer instances belong to fresh plugin generations, not the Core host.
+    load_module = FreshSourceLoader.exec_module
+
+    def load_timer(loader, module):
+        load_module(loader, module)
+        path = Path(module.__file__)
+        if path.name == "plugin.py" and path.parent.name == "timer":
+            module.AsyncioOneShotTimer = timer_factory
+
+    monkeypatch.setattr(FreshSourceLoader, "exec_module", load_timer)
     calendar = _stage_calendar(tmp_path)
     content = _stage_content(tmp_path)
     workspace = tmp_path / "workspace"
@@ -178,10 +189,9 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
             content,
             calendar,
             *(CORE / "plugins" / name for name in (
-                "content", "tools", "mcp", "managed_processes",
+                "content", "tools", "mcp", "managed_processes", "timer",
             )),
         ],
-        event_bus=EventBus(),
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
