@@ -14,21 +14,10 @@ from .tools import register_tools
 
 from pydantic import BaseModel, Field
 
-from agent.plugin_composition import (
-    MANAGED_PROCESSES,
-    MCP_SERVERS,
-    RUNTIME_STARTED,
-    RUNTIME_STOPPING,
-    TIMERS,
-    Context,
-    EndpointEnv,
-    ManagedProcessDefinition,
-    McpServerDefinition,
-    PluginTimers,
-    ServiceKey,
-    TimerHandle,
-    TimerStatus,
-)
+from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context, ServiceKey
+from plugins.managed_processes.contract import MANAGED_PROCESSES, ManagedProcessDefinition
+from plugins.mcp.contract import MCP_SERVERS, EndpointEnv, McpServerDefinition
+from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatus
 
 
 logger = logging.getLogger(__name__)
@@ -97,7 +86,7 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.2.3"
+version = "3.2.4"
 desc = "Google Calendar MCP and durable Alert source plugin"
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
@@ -164,7 +153,7 @@ class CalendarSourceRuntime:
 
     def __init__(
         self,
-        timers: PluginTimers,
+        timers: OneShotTimer,
         alerts: BoundAlertSource,
         api: CalendarContentApiPort,
         interval: timedelta,

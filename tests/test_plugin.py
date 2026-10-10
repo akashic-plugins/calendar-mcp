@@ -12,20 +12,14 @@ from calendar_test_plugin.tools import CALENDAR_TOOLS
 import pytest
 
 from calendar_test_plugin import plugin as calendar_module
-from agent.control.timer import AsyncioOneShotTimer
-from agent.plugin_composition import (
-    MANAGED_PROCESSES,
-    MCP_SERVERS,
-    TIMERS,
-    Context,
-    CompositionRoot,
-    Fiber,
-    PluginRuntime,
-    PluginTimers,
-)
+from plugins.timer.timer import AsyncioOneShotTimer
+from agent.plugin_composition import Context, CompositionRoot, Fiber, PluginRuntime
+from plugins.managed_processes.contract import MANAGED_PROCESSES
+from plugins.mcp.contract import MCP_SERVERS
+from plugins.timer.contract import TIMERS
 from agent.plugin_composition.tasks import TASKS, PluginTasks
-from agent.plugin_composition.mcp_slots import McpServerDefinition
-from agent.plugin_composition.process_slots import ManagedProcessDefinition
+from plugins.mcp.contract import McpServerDefinition
+from plugins.managed_processes.contract import ManagedProcessDefinition
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from calendar_test_plugin.plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
@@ -170,7 +164,7 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    await root.context.provide(TIMERS, AsyncioOneShotTimer())
     alerts = RecordingAlerts()
     _ = await root.context.provide(
         EVENTMAIL_ALERT_SOURCE, AlertSources(alerts)
@@ -215,7 +209,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
     servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    await root.context.provide(TIMERS, AsyncioOneShotTimer())
     tasks, tools_fiber = await _mount_tools(root, tmp_path)
     try:
         plugin = ComposablePlugin.from_module(
@@ -246,7 +240,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
     assert manifest.name == "calendar"
-    assert manifest.version == calendar_module.version == "3.2.3"
+    assert manifest.version == calendar_module.version == "3.2.4"
     assert manifest.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
@@ -257,7 +251,7 @@ async def test_tick_reports_alert_before_committing_source_batch() -> None:
     alerts = RecordingAlerts()
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
-        PluginTimers.candidate_validation(),
+        AsyncioOneShotTimer(),
         cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
@@ -275,7 +269,7 @@ async def test_report_failure_does_not_commit_source_batch() -> None:
     alerts.failure = RuntimeError("Wake Alert report failed")
     api = RecordingApi()
     runtime = CalendarSourceRuntime(
-        PluginTimers.candidate_validation(),
+        AsyncioOneShotTimer(),
         cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
@@ -295,7 +289,7 @@ async def test_terminal_wake_alert_acks_calendar_source(status: str) -> None:
     api.pending_items = ({"item_id": "event-1", "payload": {"title": "Meeting soon"}},)
     api.batch = {"status": "no_batch"}
     runtime = CalendarSourceRuntime(
-        PluginTimers.candidate_validation(),
+        AsyncioOneShotTimer(),
         cast(BoundAlertSource, alerts),
         api,
         timedelta(minutes=5),
@@ -310,7 +304,7 @@ async def test_transport_failure_is_rearmed(caplog: pytest.LogCaptureFixture) ->
     api = RecordingApi()
     api.poll_failures = 1
     runtime = CalendarSourceRuntime(
-        PluginTimers(AsyncioOneShotTimer()),
+        AsyncioOneShotTimer(),
         cast(BoundAlertSource, RecordingAlerts()),
         api,
         timedelta(hours=1),
