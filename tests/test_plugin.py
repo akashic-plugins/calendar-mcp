@@ -34,6 +34,9 @@ class _RecordingProcessHandle:
     def __init__(self, definition: ManagedProcessDefinition) -> None:
         self.definition = definition
 
+    def check(self, _ctx: object) -> None:
+        return None
+
     def port(self, _ctx: object) -> int:
         return self.definition.formal_port
 
@@ -240,7 +243,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
 def test_static_manifest_matches_v3_2_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
     assert manifest.name == "calendar"
-    assert manifest.version == calendar_module.version == "3.2.4"
+    assert manifest.version == calendar_module.version == "3.2.5"
     assert manifest.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()

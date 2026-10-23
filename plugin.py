@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -60,12 +60,14 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
     formal_port=18000,
     readiness_path="/health",
     startup_timeout_seconds=15.0,
+    # 不挡宿主就绪；工具经 MCP 借用、Alert 轮询首轮前等就绪。
+    background_ready=True,
 )
 
 
 api_version = 3
 name = "calendar"
-version = "3.2.4"
+version = "3.2.5"
 desc = "Google Calendar MCP and durable Alert source plugin"
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
@@ -136,11 +138,13 @@ class CalendarSourceRuntime:
         alerts: BoundAlertSource,
         api: CalendarContentApiPort,
         interval: timedelta,
+        api_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._timers = timers
         self._alerts = alerts
         self._api = api
         self._interval = interval
+        self._api_ready = api_ready
         self._handle: TimerHandle | None = None
         self._task: asyncio.Task[None] | None = None
         self._closed = False
@@ -171,6 +175,9 @@ class CalendarSourceRuntime:
     async def _run(self) -> None:
         """Wait, poll, and re-arm while Fiber ownership remains healthy."""
 
+        # Calendar API 在后台就绪；首轮前等它可用，避免开机第一轮失败后等满间隔。
+        if self._api_ready is not None:
+            await self._api_ready()
         deadline = datetime.now(UTC)
         while not self._closed:
             handle = self._timers.schedule(deadline)
@@ -253,6 +260,10 @@ async def apply(ctx: Context) -> None:
 
     await register_tools(ctx, description=desc)
 
+    async def api_ready() -> None:
+        async with calendar_process.borrow(ctx):
+            return
+
     # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
     async def apply_eventmail(source_ctx: Context) -> None:
         alerts = source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar")
@@ -265,6 +276,7 @@ async def apply(ctx: Context) -> None:
             alerts,
             CalendarContentApi(CALENDAR_PROCESS.formal_port),
             timedelta(seconds=config.content.poll_interval_seconds),
+            api_ready=api_ready,
         )
         _ = await source_ctx.effect(
             lambda: runtime.close,
