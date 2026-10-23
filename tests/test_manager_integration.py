@@ -12,7 +12,7 @@ import pytest
 
 from agent.plugins.importer import FreshSourceLoader
 from plugins.timer.contract import TimerReceipt, TimerStatus
-from session.log import MessageLog
+from plugins.ledger.log import MessageLog
 from plugins.mcp.contract import MCP_SERVERS
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
@@ -109,8 +109,7 @@ def _stage_calendar(tmp_path: Path) -> Path:
     for relative in (
         "plugin.py",
         "tools.py",
-        "_tool_contract.py",
-        "tool_catalog.json",
+                "tool_catalog.json",
         "mcp/requirements.txt",
         "mcp/run_mcp.py",
         "mcp/run_server.py",
@@ -182,26 +181,14 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
     workspace.mkdir()
     PluginSelection(workspace).initialize()
     _prepare_python_environment(calendar, workspace)
-    log = MessageLog(tmp_path / "sessions.db")
-    manager = PluginManager(
-        message_log=log,
-        plugin_dirs=[
-            content,
-            calendar,
-            *(CORE / "plugins" / name for name in (
-                "content", "tools", "mcp", "managed_processes", "timer",
-            )),
-        ],
-        workspace=workspace,
-        installed_cache_root=tmp_path / "cache",
-    )
+    log = MessageLog(workspace / "sessions.db")
+    manager = PluginManager(plugin_dirs=[content, calendar, *(CORE / 'plugins' / name for name in ('ledger', 'host_execution', 'content', 'tools', 'mcp', 'managed_processes', 'timer'))], workspace=workspace, installed_cache_root=tmp_path / 'cache')
     try:
         await manager.load_all()
         root = manager.live_root
         calendar_generation = manager.generation("calendar")
         assert root is not None and calendar_generation is not None
         assert calendar_generation.fiber is not None
-        await manager.start_runtime()
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
 

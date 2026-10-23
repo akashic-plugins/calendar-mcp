@@ -9,12 +9,12 @@ from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from ._tool_contract import TOOLS
+from plugins.tools.contract import TOOLS
 from .tools import register_tools
 
 from pydantic import BaseModel, Field
 
-from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context, ServiceKey
+from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context
 from plugins.managed_processes.contract import MANAGED_PROCESSES, ManagedProcessDefinition
 from plugins.mcp.contract import MCP_SERVERS, EndpointEnv, McpServerDefinition
 from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatus
@@ -23,28 +23,7 @@ from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatu
 logger = logging.getLogger(__name__)
 
 
-class BoundAlertSource(Protocol):
-    def close(self) -> None: ...
-
-    async def report(
-        self,
-        *,
-        event_id: str,
-        payload: Mapping[str, object],
-        observed_at: datetime,
-        expires_at: datetime | None = None,
-    ) -> Mapping[str, object]: ...
-
-    async def status(self, *, event_id: str) -> str | None: ...
-
-
-class AlertSourceServices(Protocol):
-    def bind(self, source_id: str) -> BoundAlertSource: ...
-
-
-EVENTMAIL_ALERT_SOURCE = ServiceKey[AlertSourceServices](
-    "eventmail.alert_source.v2"
-)
+from plugins.eventmail.contract import BoundAlertSource, EVENTMAIL_ALERT_SOURCE
 
 
 class CalendarContentApiPort(Protocol):
