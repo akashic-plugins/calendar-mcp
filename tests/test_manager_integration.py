@@ -189,7 +189,6 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         calendar_generation = manager.generation("calendar")
         assert root is not None and calendar_generation is not None
         assert calendar_generation.fiber is not None
-        await manager.start_runtime()
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
 
