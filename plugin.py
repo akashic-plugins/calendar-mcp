@@ -23,7 +23,7 @@ from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatu
 logger = logging.getLogger(__name__)
 
 
-from plugins.eventmail.contract import BoundAlertSource, EVENTMAIL_ALERT_SOURCE
+from plugins.watch.contract import WATCH_EVENTS, WatchEvents
 
 
 class CalendarContentApiPort(Protocol):
@@ -67,8 +67,8 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.2.5"
-desc = "Google Calendar MCP and durable Alert source plugin"
+version = "3.3.0"
+desc = "Google Calendar MCP and Watch event source plugin"
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
 
 
@@ -130,24 +130,25 @@ class CalendarContentApi:
 
 
 class CalendarSourceRuntime:
-    """Report frozen Calendar Alert batches and own one-shot timers."""
+    """Emit frozen Calendar batches to Watch and own one-shot timers."""
 
     def __init__(
         self,
         timers: OneShotTimer,
-        alerts: BoundAlertSource,
+        events: WatchEvents,
         api: CalendarContentApiPort,
         interval: timedelta,
         api_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._timers = timers
-        self._alerts = alerts
+        self._events = events
         self._api = api
         self._interval = interval
         self._api_ready = api_ready
         self._handle: TimerHandle | None = None
         self._task: asyncio.Task[None] | None = None
         self._closed = False
+        self._drained = False
 
     async def start(self, ctx: Context) -> None:
         """Spawn exactly one Fiber-owned formal-runtime poll loop."""
@@ -197,20 +198,21 @@ class CalendarSourceRuntime:
                 await handle.cleanup()
             deadline = datetime.now(UTC) + self._interval
 
-    async def _tick(self) -> None:
-        """Report current alerts, ACK terminal identities, and commit the source batch."""
-
-        # 1. Submitted Calendar rows remain queryable until Wake reaches a terminal state.
+    # 升级后第一轮：旧流程停在"未结算"的条目早已交过，直接确认掉，不再重交。
+    async def _drain_legacy_pending(self) -> None:
+        # 1. 已提交批次里的条目都交付过；尚未提交的活动批次会在 poll 中按冻结内容重新 emit。
         for item in await self._api.pending():
-            event_id, payload, _expires_at = _alert_item(item)
-            if await self._alerts.status(event_id=event_id) in {
-                "delivered",
-                "skipped",
-                "expired",
-            }:
-                _ = await self._api.acknowledge(event_id)
+            event_id, _payload = _alert_item(item)
+            _ = await self._api.acknowledge(event_id)
+        self._drained = True
 
-        # 2. Freeze one new batch and report each stable Alert identity.
+    # 取一个冻结批次，逐条 emit 并立刻确认，最后提交批次。
+    async def _tick(self) -> None:
+        # 1. 首轮清理旧积压。
+        if not self._drained:
+            await self._drain_legacy_pending()
+
+        # 2. 取冻结批次。
         batch = await self._api.poll()
         status = batch.get("status")
         if status == "no_batch":
@@ -221,20 +223,29 @@ class CalendarSourceRuntime:
         items = batch["items"]
         if not isinstance(items, list):
             raise RuntimeError("calendar Alert batch items 不是列表")
-        now = datetime.now(UTC)
+
+        # 3. emit 成功即交付完成，立刻向 Calendar API 确认。
         for item in items:
             if not isinstance(item, Mapping):
                 raise RuntimeError("calendar Alert batch item 不是对象")
-            event_id, payload, expires_at = _alert_item(item)
-            _ = await self._alerts.report(
-                event_id=event_id,
-                payload=payload,
-                observed_at=now,
-                expires_at=expires_at,
-            )
+            event_id, payload = _alert_item(item)
+            await self._emit(event_id, payload)
+            _ = await self._api.acknowledge(event_id)
 
-        # 3. Advance only after Wake accepted every Alert report.
+        # 4. 全部交付后才推进批次游标。
         _ = await self._api.commit(batch_id)
+
+    # 把 Calendar payload 映射成一条 Watch 事件，key 用稳定的 event_id。
+    async def _emit(self, event_id: str, payload: Mapping[str, object]) -> None:
+        url = payload.get("url")
+        _ = await self._events.emit(
+            "calendar",
+            title=_text(payload.get("title")),
+            text=_text(payload.get("content")),
+            url=url if isinstance(url, str) else "",
+            at=_aware_time(payload.get("published_at")),
+            key=event_id,
+        )
 
 
 async def apply(ctx: Context) -> None:
@@ -264,23 +275,18 @@ async def apply(ctx: Context) -> None:
         async with calendar_process.borrow(ctx):
             return
 
-    # 2. EventMail 存在时，独立子 Fiber 才启动 Alert 来源。
-    async def apply_eventmail(source_ctx: Context) -> None:
-        alerts = source_ctx.require(EVENTMAIL_ALERT_SOURCE).bind("calendar")
-        _ = await source_ctx.effect(
-            lambda: alerts.close,
-            label="calendar-alert-source-binding",
-        )
+    # 2. WATCH_EVENTS 存在时，独立子 Fiber 才启动日程来源。
+    async def apply_watch(source_ctx: Context) -> None:
         runtime = CalendarSourceRuntime(
             source_ctx.require(TIMERS),
-            alerts,
+            source_ctx.require(WATCH_EVENTS),
             CalendarContentApi(CALENDAR_PROCESS.formal_port),
             timedelta(seconds=config.content.poll_interval_seconds),
             api_ready=api_ready,
         )
         _ = await source_ctx.effect(
             lambda: runtime.close,
-            label="calendar-alert-runtime",
+            label="calendar-watch-runtime",
         )
         _ = await source_ctx.on(
             RUNTIME_STARTED, lambda _event: runtime.start(source_ctx)
@@ -288,28 +294,29 @@ async def apply(ctx: Context) -> None:
         _ = await source_ctx.on(RUNTIME_STOPPING, lambda _event: runtime.close())
 
     _ = await ctx.inject(
-        (TIMERS, EVENTMAIL_ALERT_SOURCE),
-        apply_eventmail,
-        name="calendar-eventmail-source",
+        (TIMERS, WATCH_EVENTS),
+        apply_watch,
+        name="calendar-watch-source",
     )
 
 
-def _alert_item(
-    item: Mapping[str, object],
-) -> tuple[str, Mapping[str, object], datetime | None]:
+def _alert_item(item: Mapping[str, object]) -> tuple[str, Mapping[str, object]]:
     event_id = item.get("item_id")
     payload = item.get("payload")
     if not isinstance(event_id, str) or not event_id:
         raise RuntimeError("calendar Alert item_id 必须是非空字符串")
     if not isinstance(payload, Mapping):
         raise RuntimeError("calendar Alert payload 必须是对象")
-    raw_expiry = item.get("expires_at")
-    if raw_expiry is None:
-        expires_at = None
-    elif isinstance(raw_expiry, str):
-        expires_at = datetime.fromisoformat(raw_expiry)
-        if expires_at.tzinfo is None:
-            raise RuntimeError("calendar Alert expires_at 必须带时区")
-    else:
-        raise RuntimeError("calendar Alert expires_at 必须是 ISO 时间")
-    return event_id, cast(Mapping[str, object], payload), expires_at
+    return event_id, cast(Mapping[str, object], payload)
+
+
+def _text(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+# 日程开始时间转成带时区时间；缺失或无时区则不带 at。
+def _aware_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else None

@@ -124,9 +124,30 @@ def _stage_calendar(tmp_path: Path) -> Path:
     return source
 
 
-def _stage_content(tmp_path: Path) -> Path:
-    source = tmp_path / "eventmail"
-    shutil.copytree(CORE / "plugins" / "eventmail", source)
+def _stage_watch_stub(tmp_path: Path) -> Path:
+    """Provide only the Watch event entry; the real Watch owner needs model services."""
+
+    source = tmp_path / "watch"
+    source.mkdir()
+    (source / "plugin.py").write_text(
+        "from agent.plugin_composition import Context\n"
+        "from plugins.watch.contract import WATCH_EVENTS\n"
+        "\n"
+        "api_version = 3\n"
+        "name = \"watch\"\n"
+        "version = \"0.0.0\"\n"
+        "desc = \"Watch event entry fixture\"\n"
+        "\n"
+        "\n"
+        "class _Events:\n"
+        "    async def emit(self, source: str, **_fields: object) -> str:\n"
+        "        return source\n"
+        "\n"
+        "\n"
+        "async def apply(ctx: Context) -> None:\n"
+        "    await ctx.provide(WATCH_EVENTS, _Events())\n",
+        encoding="utf-8",
+    )
     return source
 
 
@@ -176,13 +197,12 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
 
     monkeypatch.setattr(FreshSourceLoader, "exec_module", load_timer)
     calendar = _stage_calendar(tmp_path)
-    content = _stage_content(tmp_path)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     PluginSelection(workspace).initialize()
     _prepare_python_environment(calendar, workspace)
     log = MessageLog(workspace / "sessions.db")
-    manager = PluginManager(plugin_dirs=[content, calendar, *(CORE / 'plugins' / name for name in ('ledger', 'host_execution', 'content', 'tools', 'mcp', 'managed_processes', 'timer'))], workspace=workspace, installed_cache_root=tmp_path / 'cache')
+    manager = PluginManager(plugin_dirs=[calendar, _stage_watch_stub(tmp_path), *(CORE / 'plugins' / name for name in ('ledger', 'host_execution', 'content', 'tools', 'mcp', 'managed_processes', 'timer'))], workspace=workspace, installed_cache_root=tmp_path / 'cache')
     try:
         await manager.load_all()
         root = manager.live_root
@@ -222,7 +242,7 @@ async def test_manager_boots_calendar_with_content_and_no_proactive_bridge(
         assert not any("proactive" in item.name for item in receipt.health)
 
         # The old Alert binding must release during local replacement before
-        # the new Calendar source may own the same EventMail source ID.
+        # the new Calendar source may start its own polling.
         with (calendar / "plugin.py").open("a", encoding="utf-8") as handle:
             handle.write("\n# local replacement fixture revision\n")
         _prepare_python_environment(calendar, workspace)
