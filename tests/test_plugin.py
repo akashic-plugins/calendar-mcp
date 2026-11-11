@@ -23,7 +23,7 @@ from plugins.managed_processes.contract import ManagedProcessDefinition
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from calendar_test_plugin.plugin import CalendarConfig, CalendarContentApiError, CalendarSourceRuntime
-from calendar_test_plugin.plugin import BoundAlertSource, EVENTMAIL_ALERT_SOURCE
+from plugins.watch.contract import WATCH_EVENTS, WatchEvents
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,44 +92,49 @@ async def _mount_tools(
     return tasks, fiber
 
 
-class RecordingAlerts:
+class RecordingEvents:
     def __init__(self) -> None:
-        self.reports: list[dict[str, object]] = []
-        self.statuses: dict[str, str] = {}
+        self.emits: list[dict[str, object]] = []
+        self.order: list[str] = []
         self.failure: Exception | None = None
-        self.closed = 0
 
-    def close(self) -> None:
-        self.closed += 1
-
-    async def report(self, **kwargs: object) -> Mapping[str, object]:
+    async def emit(
+        self,
+        source: str,
+        *,
+        title: str = "",
+        text: str = "",
+        url: str = "",
+        at: datetime | None = None,
+        state: bool = False,
+        key: str = "",
+    ) -> str:
         if self.failure is not None:
             raise self.failure
-        self.reports.append(dict(kwargs))
-        return {"accepted": True}
-
-    async def status(self, *, event_id: str) -> str | None:
-        return self.statuses.get(event_id)
-
-
-class AlertSources:
-    def __init__(self, alerts: RecordingAlerts) -> None:
-        self.alerts = alerts
-
-    def bind(self, source_id: str) -> BoundAlertSource:
-        assert source_id == "calendar"
-        return self.alerts
+        self.order.append(f"emit:{key}")
+        self.emits.append(
+            {"source": source, "title": title, "text": text, "url": url,
+             "at": at, "state": state, "key": key}
+        )
+        return f"watch-{len(self.emits)}"
 
 
 class RecordingApi:
-    def __init__(self) -> None:
+    def __init__(self, order: list[str] | None = None) -> None:
+        self.order = order if order is not None else []
         self.batch: Mapping[str, object] = {
             "status": "batch",
             "batch_id": "calendar:0:stable",
             "items": [
                 {
                     "item_id": "event-1",
-                    "payload": {"title": "Meeting soon", "kind": "alert"},
+                    "payload": {
+                        "title": "Meeting soon",
+                        "content": "calendar 有一条日程提醒：Meeting soon",
+                        "url": "https://calendar.example/event-1",
+                        "published_at": "2026-08-23T11:00:00+00:00",
+                        "kind": "alert",
+                    },
                 }
             ],
         }
@@ -150,16 +155,18 @@ class RecordingApi:
         return self.batch
 
     async def commit(self, batch_id: str) -> Mapping[str, object]:
+        self.order.append("commit")
         self.commits.append(batch_id)
         return {"committed": True}
 
     async def acknowledge(self, event_id: str) -> Mapping[str, object]:
+        self.order.append(f"ack:{event_id}")
         self.acks.append(event_id)
         return {"acknowledged": True}
 
 
 @pytest.mark.asyncio
-async def test_v3_apply_registers_calendar_process_and_alert_source(
+async def test_v3_apply_registers_calendar_process_and_watch_source(
     tmp_path: Path,
 ) -> None:
     root = CompositionRoot("calendar:test")
@@ -168,10 +175,8 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
     await root.context.provide(MANAGED_PROCESSES, processes)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, AsyncioOneShotTimer())
-    alerts = RecordingAlerts()
-    _ = await root.context.provide(
-        EVENTMAIL_ALERT_SOURCE, AlertSources(alerts)
-    )
+    events = RecordingEvents()
+    _ = await root.context.provide(WATCH_EVENTS, cast(WatchEvents, events))
 
     tasks, tools_fiber = await _mount_tools(root, tmp_path)
     try:
@@ -196,18 +201,17 @@ async def test_v3_apply_registers_calendar_process_and_alert_source(
         mcp = servers.definitions["calendar"]
         assert process == calendar_module.CALENDAR_PROCESS
         assert mcp.endpoint_env[0].process.port(root.context) == process.formal_port
-        assert EVENTMAIL_ALERT_SOURCE not in calendar_module.inject
+        assert WATCH_EVENTS not in calendar_module.inject
         assert any(item["name"].startswith("mcp_calendar__") for item in (ref.description for ref in root.context.require(CALENDAR_TOOLS).refs))
     finally:
         await tasks.close()
         await tools_fiber.dispose()
         await root.dispose()
-    assert alerts.closed == 1
 
 
 @pytest.mark.asyncio
-async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path) -> None:
-    root = CompositionRoot("calendar:without-eventmail")
+async def test_v3_apply_keeps_calendar_services_without_watch(tmp_path: Path) -> None:
+    root = CompositionRoot("calendar:without-watch")
     processes = _RecordingProcesses()
     servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
@@ -224,7 +228,7 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
             inject=plugin.inject,
             runtime=PluginRuntime(
                 plugin_id="calendar",
-                generation_id="calendar:without-eventmail",
+                generation_id="calendar:without-watch",
                 plugin_dir=ROOT,
                 data_dir=tmp_path / "plugin-data",
                 workspace=tmp_path / "workspace",
@@ -240,66 +244,74 @@ async def test_v3_apply_keeps_calendar_services_without_eventmail(tmp_path: Path
         await root.dispose()
 
 
-def test_static_manifest_matches_v3_2_module() -> None:
+def test_static_manifest_matches_v3_3_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
     assert manifest.name == "calendar"
-    assert manifest.version == calendar_module.version == "3.2.5"
+    assert manifest.version == calendar_module.version == "3.3.0"
     assert manifest.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()
 
 
-@pytest.mark.asyncio
-async def test_tick_reports_alert_before_committing_source_batch() -> None:
-    alerts = RecordingAlerts()
-    api = RecordingApi()
-    runtime = CalendarSourceRuntime(
+def _runtime(events: RecordingEvents, api: RecordingApi) -> CalendarSourceRuntime:
+    return CalendarSourceRuntime(
         AsyncioOneShotTimer(),
-        cast(BoundAlertSource, alerts),
+        cast(WatchEvents, events),
         api,
         timedelta(minutes=5),
     )
 
-    await runtime._tick()
 
-    assert alerts.reports[0]["event_id"] == "event-1"
-    assert api.commits == ["calendar:0:stable"]
+@pytest.mark.asyncio
+async def test_tick_emits_acks_then_commits_source_batch() -> None:
+    events = RecordingEvents()
+    api = RecordingApi(events.order)
+
+    await _runtime(events, api)._tick()
+
+    assert events.emits == [
+        {
+            "source": "calendar",
+            "title": "Meeting soon",
+            "text": "calendar 有一条日程提醒：Meeting soon",
+            "url": "https://calendar.example/event-1",
+            "at": datetime(2026, 8, 23, 11, tzinfo=UTC),
+            "state": False,
+            "key": "event-1",
+        }
+    ]
+    assert events.order == ["emit:event-1", "ack:event-1", "commit"]
 
 
 @pytest.mark.asyncio
-async def test_report_failure_does_not_commit_source_batch() -> None:
-    alerts = RecordingAlerts()
-    alerts.failure = RuntimeError("Wake Alert report failed")
+async def test_emit_failure_does_not_ack_or_commit_source_batch() -> None:
+    events = RecordingEvents()
+    events.failure = RuntimeError("Watch emit failed")
     api = RecordingApi()
-    runtime = CalendarSourceRuntime(
-        AsyncioOneShotTimer(),
-        cast(BoundAlertSource, alerts),
-        api,
-        timedelta(minutes=5),
-    )
 
-    with pytest.raises(RuntimeError, match="report failed"):
-        await runtime._tick()
+    with pytest.raises(RuntimeError, match="emit failed"):
+        await _runtime(events, api)._tick()
+    assert api.acks == []
     assert api.commits == []
 
 
-@pytest.mark.parametrize("status", ["delivered", "skipped", "expired"])
 @pytest.mark.asyncio
-async def test_terminal_wake_alert_acks_calendar_source(status: str) -> None:
-    alerts = RecordingAlerts()
-    alerts.statuses["event-1"] = status
+async def test_first_tick_acks_legacy_pending_without_re_emitting() -> None:
+    events = RecordingEvents()
     api = RecordingApi()
-    api.pending_items = ({"item_id": "event-1", "payload": {"title": "Meeting soon"}},)
-    api.batch = {"status": "no_batch"}
-    runtime = CalendarSourceRuntime(
-        AsyncioOneShotTimer(),
-        cast(BoundAlertSource, alerts),
-        api,
-        timedelta(minutes=5),
+    api.pending_items = (
+        {"item_id": "old-1", "payload": {"title": "old"}},
+        {"item_id": "old-2", "payload": {"title": "old"}},
     )
+    api.batch = {"status": "no_batch"}
+    runtime = _runtime(events, api)
 
     await runtime._tick()
-    assert api.acks == ["event-1"]
+    api.pending_items = ({"item_id": "late", "payload": {"title": "late"}},)
+    await runtime._tick()
+
+    assert api.acks == ["old-1", "old-2"]
+    assert events.emits == []
 
 
 @pytest.mark.asyncio
@@ -308,7 +320,7 @@ async def test_transport_failure_is_rearmed(caplog: pytest.LogCaptureFixture) ->
     api.poll_failures = 1
     runtime = CalendarSourceRuntime(
         AsyncioOneShotTimer(),
-        cast(BoundAlertSource, RecordingAlerts()),
+        cast(WatchEvents, RecordingEvents()),
         api,
         timedelta(hours=1),
     )
