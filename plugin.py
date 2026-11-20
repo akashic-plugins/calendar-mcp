@@ -114,7 +114,7 @@ class ServiceAuthorization:
             return {"ready": False, "reason": "日历服务还没启动好，稍后刷新"}
         if not health.get("client_configured"):
             return {"ready": False, "reason": "还需要填写 Google OAuth 客户端 ID 和密钥"}
-        if health.get("authentication") != "authenticated":
+        if health.get("authentication") != "authenticated" and not health.get("token_saved"):
             return {"ready": False, "reason": "还没有授权 Google 日历：保存客户端后点下方「获取授权链接」"}
         return {"ready": True, "reason": ""}
 

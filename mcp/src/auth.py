@@ -46,6 +46,10 @@ def client_configured() -> bool:
     return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
 
 
+def token_saved() -> bool:
+    return Path(TOKEN_FILE).is_file()
+
+
 def _client_config() -> dict:
     return {"installed": {
         "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,

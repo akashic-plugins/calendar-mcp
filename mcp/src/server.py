@@ -37,7 +37,7 @@ from src.content_source import (
 # Import functions and models directly using absolute imports
 try:
     # Use absolute imports for consistency
-    from src.auth import client_configured, finish_authorization, get_credentials, start_authorization
+    from src.auth import client_configured, finish_authorization, get_credentials, start_authorization, token_saved
     import src.calendar_actions as calendar_actions
     from src.models import (
         GoogleCalendarEvent,
@@ -254,7 +254,9 @@ def get_api_key():
 def health_check():
     """Basic health check endpoint."""
     auth_status = "authenticated" if global_credentials and global_credentials.valid else "authentication_failed_or_pending"
-    return {"status": "ok", "authentication": auth_status, "client_configured": client_configured()}
+    # 令牌在第一次调用 Google API 时才加载；已保存的令牌文件同样算作已授权。
+    return {"status": "ok", "authentication": auth_status, "client_configured": client_configured(),
+            "token_saved": token_saved()}
 
 
 class AuthFinishRequest(BaseModel):
