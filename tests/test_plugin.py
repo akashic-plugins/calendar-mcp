@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from agent.plugin_composition import CREDENTIALS
+from agent.plugin_composition.credentials import CredentialClients
+
 import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -173,6 +176,7 @@ async def test_v3_apply_registers_calendar_process_and_watch_source(
     processes = _RecordingProcesses()
     servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
+    await root.context.provide(CREDENTIALS, CredentialClients({}))
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, AsyncioOneShotTimer())
     events = RecordingEvents()
@@ -215,6 +219,7 @@ async def test_v3_apply_keeps_calendar_services_without_watch(tmp_path: Path) ->
     processes = _RecordingProcesses()
     servers = _RecordingMcpServers()
     await root.context.provide(MANAGED_PROCESSES, processes)
+    await root.context.provide(CREDENTIALS, CredentialClients({}))
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, AsyncioOneShotTimer())
     tasks, tools_fiber = await _mount_tools(root, tmp_path)
@@ -247,7 +252,7 @@ async def test_v3_apply_keeps_calendar_services_without_watch(tmp_path: Path) ->
 def test_static_manifest_matches_v3_3_module() -> None:
     manifest = load_static_plugin_manifest(ROOT)
     assert manifest.name == "calendar"
-    assert manifest.version == calendar_module.version == "3.3.0"
+    assert manifest.version == calendar_module.version == "3.4.0"
     assert manifest.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert "PROACTIVE_COMPONENTS" not in (ROOT / "plugin.py").read_text()

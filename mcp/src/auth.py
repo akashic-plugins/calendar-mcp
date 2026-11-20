@@ -7,7 +7,8 @@ import threading
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
-from google_auth_oauthlib.flow import InstalledAppFlow
+from urllib.parse import parse_qs, urlsplit
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
@@ -36,6 +37,59 @@ SCOPES = [os.getenv('CALENDAR_SCOPES', 'https://www.googleapis.com/auth/calendar
 REDIRECT_PORT = int(os.getenv('OAUTH_CALLBACK_PORT', 8080))
 REDIRECT_URI = f'http://localhost:{REDIRECT_PORT}/oauth2callback'
 # Note: REDIRECT_URI must be registered in your Google Cloud Console OAuth Client settings!
+
+# 授权回来的 scope 顺序或集合有出入时 oauthlib 会抛错；以 Google 实际授予的为准。
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
+
+
+def client_configured() -> bool:
+    return bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+
+def _client_config() -> dict:
+    return {"installed": {
+        "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": ["http://localhost", REDIRECT_URI],
+    }}
+
+
+# 粘贴回调网址式授权：浏览器访问不到容器里的回调端口，用户把最后停下的网址交回来。
+# 进行中的授权只在本进程内存里（含 PKCE verifier），进程重启后要重新开始。
+_pending_flow: Flow | None = None
+
+
+def start_authorization() -> str:
+    global _pending_flow
+    if not client_configured():
+        raise ValueError("还没有填写 Google OAuth 客户端 ID 和密钥")
+    flow = Flow.from_client_config(_client_config(), scopes=SCOPES, redirect_uri=REDIRECT_URI,
+                                   autogenerate_code_verifier=True)
+    url, _state = flow.authorization_url(access_type="offline", prompt="consent")
+    _pending_flow = flow
+    return url
+
+
+def finish_authorization(callback: str) -> Credentials:
+    global _pending_flow
+    query = parse_qs(urlsplit(callback).query)
+    if "error" in query:
+        raise ValueError(f"Google 拒绝了授权：{query['error'][0]}")
+    code = query.get("code", [""])[0]
+    if not code:
+        raise ValueError("网址里没有 code 参数，请复制授权完成后地址栏里的完整网址")
+    flow = _pending_flow
+    if flow is None:
+        raise ValueError("授权已过期或服务重启过，请重新获取授权链接")
+    try:
+        flow.fetch_token(code=code)
+    except Exception as error:
+        raise ValueError(f"换取令牌失败，请重新获取授权链接：{error}") from error
+    _pending_flow = None
+    creds = flow.credentials
+    Path(TOKEN_FILE).write_text(creds.to_json(), encoding="utf-8")
+    return creds
+
 
 # --- Helper Classes/Functions ---
 

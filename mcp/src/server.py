@@ -37,7 +37,7 @@ from src.content_source import (
 # Import functions and models directly using absolute imports
 try:
     # Use absolute imports for consistency
-    from src.auth import get_credentials
+    from src.auth import client_configured, finish_authorization, get_credentials, start_authorization
     import src.calendar_actions as calendar_actions
     from src.models import (
         GoogleCalendarEvent,
@@ -254,7 +254,30 @@ def get_api_key():
 def health_check():
     """Basic health check endpoint."""
     auth_status = "authenticated" if global_credentials and global_credentials.valid else "authentication_failed_or_pending"
-    return {"status": "ok", "authentication": auth_status}
+    return {"status": "ok", "authentication": auth_status, "client_configured": client_configured()}
+
+
+class AuthFinishRequest(BaseModel):
+    callback: str
+
+
+# 插件设置页的授权入口：start 给出 Google 授权页，finish 收下回调网址并立即启用新令牌。
+@app.post("/auth/start", tags=["Management"], operation_id="auth_start")
+def auth_start():
+    try:
+        return {"url": start_authorization()}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/auth/finish", tags=["Management"], operation_id="auth_finish")
+def auth_finish(request: AuthFinishRequest):
+    global global_credentials
+    try:
+        global_credentials = finish_authorization(request.callback)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"authenticated": True}
 
 
 class ContentCommitRequest(BaseModel):
