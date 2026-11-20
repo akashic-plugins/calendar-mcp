@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import uvicorn
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
 def _runtime_dir() -> Path:
@@ -19,11 +19,10 @@ def _runtime_dir() -> Path:
 
 
 RUNTIME_DIR = _runtime_dir()
-# Core 分配的端口不能被旧 .env 覆盖，否则归档调用会撞上正式进程。
-managed_port = os.environ.get("PORT")
-load_dotenv(RUNTIME_DIR / ".env", override=True)
-if managed_port is not None:
-    os.environ["PORT"] = managed_port
+# 插件设置经环境变量传入的值优先；.env 只补空缺。Core 分配的端口也不会被旧 .env 覆盖，否则归档调用会撞上正式进程。
+for _key, _value in dotenv_values(RUNTIME_DIR / ".env").items():
+    if _value is not None and not os.environ.get(_key):
+        os.environ[_key] = _value
 os.environ["TOKEN_FILE_PATH"] = str(RUNTIME_DIR / ".gcp-saved-tokens.json")
 os.environ["CALENDAR_CONTENT_CONFIG_PATH"] = str(RUNTIME_DIR / "content.json")
 os.environ.setdefault("RELOAD", "false")

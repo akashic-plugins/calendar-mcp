@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -14,8 +15,13 @@ from .tools import register_tools
 
 from pydantic import BaseModel, Field
 
-from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context
-from plugins.managed_processes.contract import MANAGED_PROCESSES, ManagedProcessDefinition
+from agent.plugin_composition import CREDENTIALS, RUNTIME_STARTED, RUNTIME_STOPPING, Context, CredentialRef
+from agent.plugin_composition.plugin_config import PLUGIN_CONFIG
+from plugins.managed_processes.contract import MANAGED_PROCESSES, ManagedProcessDefinition, ManagedProcessHandle
+from plugins.onboarding.contract import ONBOARDING, Ability, PreviewLine
+from plugins.plugin_settings.contract import (
+    SETTINGS_FORMS, Authorize, SettingsField, SettingsForm, Setup, declare_settings, declare_setup,
+)
 from plugins.mcp.contract import MCP_SERVERS, EndpointEnv, McpServerDefinition
 from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatus
 
@@ -46,6 +52,25 @@ class CalendarContentConfig(BaseModel):
 
 class CalendarConfig(BaseModel):
     content: CalendarContentConfig = Field(default_factory=CalendarContentConfig)
+    # Google Cloud 的 OAuth 客户端；没填时服务回到数据目录里旧的 .env。
+    google_client_id: str | None = None
+    google_client_secret: CredentialRef | None = None
+
+
+SETTINGS_FORM = SettingsForm(
+    title="Google 日历", description="查询和安排 Google 日历里的日程，快开始的日程会交给值班提醒。",
+    fields=(
+        SettingsField("google_client_id", "Google OAuth 客户端 ID",
+                      hint="Google Cloud 控制台新建「桌面应用」客户端，启用 Google Calendar API"),
+        SettingsField("google_client_secret", "客户端密钥", kind="secret"),
+    ),
+    setup=Setup("calendar", "日程", Ability(
+        pitch="帮你记着日程",
+        benefit="接上 Google 日历后，聊天里就能查空档、加日程，快开始的事值班会提醒你。",
+        preview=(PreviewLine("你", "周四下午三点帮我约个牙医"),
+                 PreviewLine("Akashic", "加好了：周四 15:00–16:00「牙医」。那天上午还有个组会。"))),
+    ),
+)
 
 
 CALENDAR_PROCESS = ManagedProcessDefinition(
@@ -67,9 +92,68 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.3.0"
+version = "3.4.0"
 desc = "Google Calendar MCP and Watch event source plugin"
-inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS)
+inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS, CREDENTIALS)
+
+
+# 日历服务私有回环接口上的就绪与授权；它自己保管进行中的授权和令牌文件。
+class ServiceAuthorization:
+    def __init__(self, ctx: Context, process: ManagedProcessHandle) -> None:
+        self._ctx, self._process = ctx, process
+
+    async def _call(self, method: str, path: str, body: Mapping[str, object] | None = None) -> Mapping[str, object]:
+        async with self._process.borrow(self._ctx) as port:
+            return await asyncio.to_thread(_service_json, method, f"http://127.0.0.1:{port}{path}", body)
+
+    async def status(self) -> Mapping[str, object]:
+        try:
+            async with asyncio.timeout(5):
+                health = await self._call("GET", "/health")
+        except (OSError, ValueError, TimeoutError):
+            return {"ready": False, "reason": "日历服务还没启动好，稍后刷新"}
+        if not health.get("client_configured"):
+            return {"ready": False, "reason": "还需要填写 Google OAuth 客户端 ID 和密钥"}
+        if health.get("authentication") != "authenticated" and not health.get("token_saved"):
+            return {"ready": False, "reason": "还没有授权 Google 日历：保存客户端后点下方「获取授权链接」"}
+        return {"ready": True, "reason": ""}
+
+    async def start(self) -> str:
+        url = (await self._call("POST", "/auth/start")).get("url")
+        if not isinstance(url, str) or not url.startswith("https://accounts.google.com/"):
+            raise ValueError("日历服务没有给出 Google 授权地址")
+        return url
+
+    async def finish(self, callback: str) -> None:
+        _ = await self._call("POST", "/auth/finish", {"callback": callback})
+
+
+# 服务用 400 说明用户能改正的错误，这里原样变成 ValueError 交给设置页显示。
+def _service_json(method: str, url: str, body: Mapping[str, object] | None) -> Mapping[str, object]:
+    data = None if body is None else json.dumps(body).encode()
+    request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read())
+    except HTTPError as error:
+        detail = json.loads(error.read() or b"{}").get("detail") if error.code == 400 else None
+        raise ValueError(detail if isinstance(detail, str) else f"日历服务返回 HTTP {error.code}") from error
+    except URLError as error:
+        raise ValueError(f"日历服务不可用：{error.reason}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("日历服务返回的不是对象")
+    return cast(Mapping[str, object], payload)
+
+
+# 设置里填了客户端才覆盖进程环境；空字符串会让服务回到 .env。
+async def _process_definition(ctx: Context, config: CalendarConfig) -> ManagedProcessDefinition:
+    secret = config.google_client_secret
+    if config.google_client_id is None or secret is None:
+        return CALENDAR_PROCESS
+    async with ctx.require(CREDENTIALS).open(ctx, {"google_client_secret": secret}) as client:
+        env = {**CALENDAR_PROCESS.env, "GOOGLE_CLIENT_ID": config.google_client_id,
+               "GOOGLE_CLIENT_SECRET": client.credential(secret)}
+    return replace(CALENDAR_PROCESS, env=env)
 
 
 class CalendarContentApi:
@@ -253,7 +337,7 @@ async def apply(ctx: Context) -> None:
     config = CalendarConfig.model_validate(ctx.config)
 
     # 1. One process declaration owns both the launched port and loopback client fact.
-    calendar_process = await ctx.require(MANAGED_PROCESSES).register(ctx, CALENDAR_PROCESS)
+    calendar_process = await ctx.require(MANAGED_PROCESSES).register(ctx, await _process_definition(ctx, config))
     await ctx.require(MCP_SERVERS).register(
         ctx,
         McpServerDefinition(
@@ -270,6 +354,20 @@ async def apply(ctx: Context) -> None:
     )
 
     await register_tools(ctx, description=desc)
+
+    # 设置与引导是可选依赖；就绪看服务是否已有客户端和有效令牌，授权也经它完成。
+    authorization = ServiceAuthorization(ctx, calendar_process)
+    authorize = Authorize("Google 日历授权", "保存客户端后授权一次；之后令牌自动续期",
+                          authorization.start, authorization.finish)
+
+    async def settings(child: Context) -> None:
+        _ = await declare_settings(child, CalendarConfig, SETTINGS_FORM, status=authorization.status, authorize=authorize)
+
+    async def setup(child: Context) -> None:
+        await declare_setup(child, CalendarConfig, SETTINGS_FORM, status=authorization.status)
+
+    _ = await ctx.inject((SETTINGS_FORMS, PLUGIN_CONFIG), settings, name="settings")
+    _ = await ctx.inject((SETTINGS_FORMS, PLUGIN_CONFIG, ONBOARDING), setup, name="onboarding")
 
     async def api_ready() -> None:
         async with calendar_process.borrow(ctx):
