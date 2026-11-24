@@ -1,14 +1,16 @@
-"""侧栏日历面板的数据层：90 天统一热缓存 + SWR 后台刷新，零卡顿支撑紧凑态、周/月/行动清单。"""
+"""侧栏日历面板的数据层：90 天统一热缓存 + SWR 后台刷新 + 配置驱动可扩展分类着色。"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -17,37 +19,182 @@ from urllib.request import Request, urlopen
 from agent.plugin_composition import Context
 from plugins.managed_processes.contract import ManagedProcessHandle
 
-PALETTE_KEYS = ("sage", "sky", "lavender", "sand", "rose", "slate")
+PALETTE_KEYS = ("sky", "sage", "lavender", "sand", "rose", "slate", "teal", "orange")
+_PALETTE_SET = frozenset(PALETTE_KEYS)
+
 _GOOGLE_COLOR_MAP: dict[str, str] = {
     "1": "lavender",
     "2": "sage",
     "3": "lavender",
     "4": "rose",
     "5": "sand",
-    "6": "sand",
-    "7": "sky",
+    "6": "orange",
+    "7": "teal",
     "8": "slate",
     "9": "sky",
     "10": "sage",
     "11": "rose",
     "12": "sage",
-    "13": "sage",
+    "13": "teal",
     "14": "sky",
     "15": "sky",
     "16": "lavender",
     "17": "lavender",
     "18": "rose",
     "19": "sand",
-    "20": "sand",
+    "20": "orange",
     "21": "slate",
     "22": "rose",
     "23": "lavender",
     "24": "slate",
 }
 
+DEFAULT_CATEGORIES: tuple[dict[str, object], ...] = (
+    {
+        "id": "tentative",
+        "label": "待核",
+        "color": "lavender",
+        "match": ["[待核", "[暂定", "暂定", "待核"],
+    },
+    {
+        "id": "prep",
+        "label": "复习",
+        "color": "sage",
+        "match": ["[复习", "[备考", "[准备", "复习", "备考", "冲刺"],
+    },
+    {
+        "id": "exam",
+        "label": "考试",
+        "color": "rose",
+        "match": ["[期末考", "[考试", "[quiz", "final exam", " exam", "quiz"],
+    },
+    {
+        "id": "ddl",
+        "label": "DDL",
+        "color": "sand",
+        "match": ["[ddl", "due", "assignment", "homework", "report", "ppt", "closes", "截止"],
+    },
+)
+
 WINDOW_PAST_DAYS = 28
 WINDOW_FUTURE_DAYS = 75
-FRESH_TTL_SECONDS = 300.0  # 5 分钟内直接命中内存，0ms 返回
+FRESH_TTL_SECONDS = 300.0
+
+
+@dataclass(frozen=True)
+class CategoryRule:
+    id: str
+    label: str
+    color: str
+    match: tuple[str, ...]
+    calendars: tuple[str, ...] = ()
+
+    def to_public(self) -> dict[str, object]:
+        return {"id": self.id, "label": self.label, "color": self.color}
+
+    def matches(self, summary: str, cal_id: str) -> bool:
+        cal_low = cal_id.lower()
+        if self.calendars and any(c.lower() in cal_low for c in self.calendars):
+            return True
+        text_low = summary.lower()
+        for token in self.match:
+            if token.startswith("re:"):
+                try:
+                    if re.search(token[3:], summary, re.IGNORECASE):
+                        return True
+                except re.error:
+                    continue
+            elif token.lower() in text_low:
+                return True
+        return False
+
+
+class CategoryRegistry:
+    """从插件数据目录的 categories.json 热加载分类规则；按 mtime 自动生效无需重启。"""
+
+    def __init__(self, path: Path | None) -> None:
+        self._path = path
+        self._mtime_ns: int = -1
+        self._rules: tuple[CategoryRule, ...] = _parse_rules(DEFAULT_CATEGORIES)
+
+    def _ensure_file(self) -> None:
+        if self._path is None or self._path.exists():
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "palette": list(PALETTE_KEYS),
+                "categories": list(DEFAULT_CATEGORIES),
+            }
+            self._path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def rules(self) -> tuple[CategoryRule, ...]:
+        if self._path is None:
+            return self._rules
+        self._ensure_file()
+        try:
+            stat = self._path.stat()
+        except OSError:
+            return self._rules
+        if stat.st_mtime_ns == self._mtime_ns:
+            return self._rules
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            items = raw.get("categories") if isinstance(raw, dict) else raw
+            parsed = _parse_rules(items)
+            if parsed:
+                self._rules = parsed
+            self._mtime_ns = stat.st_mtime_ns
+        except (OSError, ValueError):
+            pass
+        return self._rules
+
+    def classify(
+        self,
+        summary: str,
+        cal_id: str,
+        *,
+        explicit_id: str | None = None,
+        fallback_color: str = "sky",
+    ) -> tuple[str, str, str]:
+        """返回 (category_id, category_label, color_key)。"""
+        rules = self.rules()
+        if explicit_id:
+            for rule in rules:
+                if rule.id == explicit_id:
+                    return rule.id, rule.label, rule.color
+        if "holiday" in cal_id.lower():
+            return "holiday", "节假日", "slate"
+        for rule in rules:
+            if rule.matches(summary, cal_id):
+                return rule.id, rule.label, rule.color
+        return "other", "日程", fallback_color
+
+
+def _parse_rules(raw: object) -> tuple[CategoryRule, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[CategoryRule] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        cid = str(item.get("id") or "").strip()
+        label = str(item.get("label") or cid).strip()
+        color = str(item.get("color") or "sky").strip().lower()
+        if not cid or cid in seen:
+            continue
+        if color not in _PALETTE_SET:
+            color = "sky"
+        raw_match = item.get("match")
+        matches = tuple(str(m).strip() for m in raw_match if isinstance(m, str) and m.strip()) if isinstance(raw_match, list) else ()
+        raw_cals = item.get("calendars")
+        cals = tuple(str(c).strip() for c in raw_cals if isinstance(c, str) and c.strip()) if isinstance(raw_cals, list) else ()
+        seen.add(cid)
+        out.append(CategoryRule(id=cid, label=label, color=color, match=matches, calendars=cals))
+    return tuple(out)
 
 
 @dataclass
@@ -56,7 +203,7 @@ class _Snapshot:
     window_start: date
     window_end: date
     calendars: list[dict[str, object]]
-    events: list[dict[str, object]]
+    raw_events: list[dict[str, object]]
 
 
 def _local_now() -> datetime:
@@ -115,24 +262,10 @@ def _parse_iso(value: str, local_tz) -> datetime:
     return parsed.astimezone(local_tz)
 
 
-
-def _semantic_color(summary: str, cal_id: str, fallback: str) -> str:
-    """按事件标题语义映射透亮色系：红=考试/Quiz、琥珀=DDL/作业、绿=复习/准备、紫=待核/暂定、靛=节假日。"""
-    if "holiday" in cal_id.lower():
-        return "slate"
-    s = summary.lower()
-    if any(k in s for k in ("[待核", "[暂定", "暂定", "待核")):
-        return "lavender"
-    if any(k in s for k in ("[复习", "[备考", "[准备", "复习", "备考", "冲刺")):
-        return "sage"
-    if any(k in s for k in ("[期末考", "[考试", "[quiz", "final exam", " exam", "quiz")):
-        return "rose"
-    if any(k in s for k in ("[ddl", "due", "assignment", "homework", "report", "ppt", "closes", "截止")):
-        return "sand"
-    return fallback
+_EXPLICIT_CAT_RE = re.compile(r"\[(?:category|cat):([a-zA-Z0-9_-]+)\]", re.IGNORECASE)
 
 
-def _normalize_event(
+def _normalize_raw_event(
     raw: Mapping[str, object],
     *,
     cal_id: str,
@@ -173,10 +306,6 @@ def _normalize_event(
     else:
         return None
 
-    event_color_id = raw.get("colorId") or raw.get("color_id")
-    base_color = _GOOGLE_COLOR_MAP.get(str(event_color_id), cal_color) if event_color_id else cal_color
-    color = _semantic_color(str(raw.get("summary") or ""), cal_id, base_color) if not event_color_id else base_color
-
     response_status = ""
     attendees = raw.get("attendees")
     if isinstance(attendees, list):
@@ -192,12 +321,26 @@ def _normalize_event(
     location = str(raw.get("location") or "").strip()
     description = str(raw.get("description") or "").strip()
     html_link = str(raw.get("htmlLink") or raw.get("html_link") or "").strip()
+    event_color_id = raw.get("colorId") or raw.get("color_id")
+
+    explicit_cat: str | None = None
+    ext = raw.get("extendedProperties")
+    if isinstance(ext, Mapping):
+        priv = ext.get("private")
+        if isinstance(priv, Mapping) and isinstance(priv.get("category"), str):
+            explicit_cat = str(priv["category"]).strip()
+    if not explicit_cat and description:
+        m = _EXPLICIT_CAT_RE.search(description)
+        if m:
+            explicit_cat = m.group(1).strip()
 
     return {
         "id": str(raw.get("id") or f"{cal_id}:{start_str}:{summary}"),
         "calendar_id": cal_id,
         "calendar_name": cal_name,
-        "color": color,
+        "cal_color": cal_color,
+        "event_color_id": str(event_color_id) if event_color_id else "",
+        "explicit_category": explicit_cat or "",
         "summary": summary,
         "location": location,
         "description": description[:1500],
@@ -210,6 +353,43 @@ def _normalize_event(
         "tentative": tentative,
         "status": str(raw.get("status") or "confirmed"),
     }
+
+
+def _apply_categories(raw_events: list[dict[str, object]], registry: CategoryRegistry) -> list[dict[str, object]]:
+    """按最新 categories.json 为缓存事件即时打标着色，改配置无需重新拉 Google API。"""
+    out: list[dict[str, object]] = []
+    for ev in raw_events:
+        cal_id = str(ev["calendar_id"])
+        cal_color = str(ev["cal_color"])
+        event_color_id = str(ev["event_color_id"])
+        explicit_cat = str(ev["explicit_category"]) or None
+        cat_id, cat_label, sem_color = registry.classify(
+            str(ev["summary"]),
+            cal_id,
+            explicit_id=explicit_cat,
+            fallback_color=cal_color,
+        )
+        color = _GOOGLE_COLOR_MAP.get(event_color_id, sem_color) if event_color_id else sem_color
+        out.append({
+            "id": ev["id"],
+            "calendar_id": cal_id,
+            "calendar_name": ev["calendar_name"],
+            "category": cat_id,
+            "category_label": cat_label,
+            "color": color,
+            "summary": ev["summary"],
+            "location": ev["location"],
+            "description": ev["description"],
+            "html_link": ev["html_link"],
+            "all_day": ev["all_day"],
+            "start": ev["start"],
+            "end": ev["end"],
+            "start_ts": ev["start_ts"],
+            "end_ts": ev["end_ts"],
+            "tentative": ev["tentative"],
+            "status": ev["status"],
+        })
+    return out
 
 
 def _compute_action_state(events: list[dict[str, object]], now: datetime) -> dict[str, object]:
@@ -297,14 +477,16 @@ def _compute_action_state(events: list[dict[str, object]], now: datetime) -> dic
 
 
 class CalendarPanelService:
-    """90 天单窗口热缓存 + SWR 后台刷新；同一份快照服务所有视图，切周/切月/切清单 0ms。"""
+    """90 天单窗口热缓存 + SWR 后台刷新 + 配置驱动分类注册表。"""
 
     def __init__(self, ctx: Context, process: ManagedProcessHandle) -> None:
         self._ctx = ctx
         self._process = process
+        data_dir = getattr(getattr(ctx, "runtime", None), "data_dir", None)
+        cat_path = Path(data_dir) / "categories.json" if data_dir else None
+        self._categories = CategoryRegistry(cat_path)
         self._snapshot: _Snapshot | None = None
         self._inflight: asyncio.Task[_Snapshot] | None = None
-        self._last_error: str = ""
 
     async def _check_ready(self, port: int) -> tuple[bool, str]:
         try:
@@ -383,7 +565,7 @@ class CalendarPanelService:
                 for raw in items:
                     if not isinstance(raw, Mapping):
                         continue
-                    ev = _normalize_event(
+                    ev = _normalize_raw_event(
                         raw,
                         cal_id=cal_id,
                         cal_name=str(cal["name"]),
@@ -403,10 +585,9 @@ class CalendarPanelService:
             window_start=w_start,
             window_end=w_end,
             calendars=calendars,
-            events=merged,
+            raw_events=merged,
         )
         self._snapshot = snap
-        self._last_error = ""
         return snap
 
     def _trigger_background_refresh(self, extra_start: date | None = None, extra_end: date | None = None) -> None:
@@ -414,15 +595,7 @@ class CalendarPanelService:
             return
         task = asyncio.create_task(self._fetch_snapshot(extra_start, extra_end))
         self._inflight = task
-
-        def _done(t: asyncio.Task[_Snapshot]) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                self._last_error = str(exc)
-
-        task.add_done_callback(_done)
+        task.add_done_callback(lambda t: None if t.cancelled() else t.exception())
 
     async def _ensure_snapshot(
         self,
@@ -433,30 +606,26 @@ class CalendarPanelService:
     ) -> _Snapshot:
         snap = self._snapshot
         now_mono = time.monotonic()
-
         covers = (
             snap is not None
             and (need_start is None or snap.window_start <= need_start)
             and (need_end is None or snap.window_end >= need_end)
         )
-
         if not refresh and snap is not None and covers:
             if now_mono - snap.fetched_at > FRESH_TTL_SECONDS:
                 self._trigger_background_refresh(need_start, need_end)
             return snap
-
-        # 需要强制刷新或首次加载/超出当前缓存窗口
         if self._inflight is not None and not self._inflight.done() and not refresh:
             return await self._inflight
-
         task = asyncio.create_task(self._fetch_snapshot(need_start, need_end))
         self._inflight = task
         return await task
 
     def _pack_response(self, snap: _Snapshot, *, include_events: bool) -> dict[str, object]:
         now = _local_now()
+        events = _apply_categories(snap.raw_events, self._categories)
         selected_ids = {str(c["id"]) for c in snap.calendars if c["selected"]} or {str(c["id"]) for c in snap.calendars}
-        action_events = [ev for ev in snap.events if str(ev["calendar_id"]) in selected_ids]
+        action_events = [ev for ev in events if str(ev["calendar_id"]) in selected_ids]
         action = _compute_action_state(action_events, now)
 
         res: dict[str, object] = {
@@ -467,10 +636,11 @@ class CalendarPanelService:
             "timezone": str(now.tzinfo or "Local"),
             "window": {"start": snap.window_start.isoformat(), "end": snap.window_end.isoformat()},
             "calendars": snap.calendars,
+            "categories": [r.to_public() for r in self._categories.rules()],
             **action,
         }
         if include_events:
-            res["events"] = snap.events
+            res["events"] = events
         return res
 
     async def summary(self, *, refresh: bool = False) -> dict[str, object]:

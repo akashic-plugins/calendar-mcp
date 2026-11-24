@@ -213,7 +213,7 @@ function renderPopover(ev, onClose) {
   const card = h("div", `cal-popover ${colorClass(ev)}`, null, [
     h("div", "cal-popover__head", null, [
       h("div", null, null, [
-        h("span", "cal-popover__badge", ev.calendar_name || "日程"),
+        h("span", "cal-popover__badge", ev.category_label && ev.category !== "other" ? `${ev.category_label} · ${ev.calendar_name || "日程"}` : (ev.calendar_name || "日程")),
         h("h3", "cal-popover__title", ev.summary),
       ]),
       btn("cal-btn cal-btn--ghost cal-btn--icon", "×", onClose, { "aria-label": "关闭" }),
@@ -634,11 +634,13 @@ function renderAgendaView(events, todayIso, actions) {
 function renderExpanded(state, data, actions) {
   const todayIso = data.today_date || toIsoDate(new Date());
   const visibleCalIds = new Set((data.calendars || []).filter((c) => !state.hiddenCals.has(c.id)).map((c) => c.id));
-  const events = (data.events || []).filter((ev) => visibleCalIds.has(ev.calendar_id));
+  const hasCatFilter = state.activeCats.size > 0;
+  const matchEvent = (ev) => visibleCalIds.has(ev.calendar_id) && (!hasCatFilter || state.activeCats.has(ev.category));
+  const events = (data.events || []).filter(matchEvent);
   const byDay = indexEventsByDay(events);
 
-  // 左栏：彩色热力迷你月历 + 接下来要做什么（前 5 项） + 极简日历列表
-  const upcomingFiltered = (data.upcoming || []).filter((ev) => visibleCalIds.has(ev.calendar_id)).slice(0, 5);
+  // 左栏：彩色热力迷你月历 + 动态分类筛选 + 接下来要做什么（前 5 项） + 极简日历列表
+  const upcomingFiltered = (data.upcoming || []).filter(matchEvent).slice(0, 5);
   const upcomingSection = h("div", "cal-rail-sec", null, [
     h("div", "cal-rail-sec__title", null, [h("span", null, "接下来"), h("span", null, `${upcomingFiltered.length} 项`)]),
     ...(upcomingFiltered.length
@@ -668,15 +670,20 @@ function renderExpanded(state, data, actions) {
     return row;
   });
 
-  const legend = h("div", "cal-legend", null, [
-    ["rose", "考试"],
-    ["sand", "DDL"],
-    ["sage", "复习"],
-    ["lavender", "待核"],
-  ].map(([c, label]) => h("span", `cal-legend__item cal-c-${c}`, null, [
-    h("i", "cal-legend__dot"),
-    document.createTextNode(label),
-  ])));
+  const categories = Array.isArray(data.categories) ? data.categories : [];
+  const legend = categories.length ? h("div", "cal-legend", null, categories.map((cat) => {
+    const active = state.activeCats.has(cat.id);
+    const dimmed = hasCatFilter && !active;
+    const chip = h("button", `cal-legend__chip cal-c-${cat.color || "sky"}${dimmed ? " is-dimmed" : ""}`, null, [
+      h("i", "cal-legend__dot"),
+      document.createTextNode(cat.label),
+    ]);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(active));
+    chip.title = active ? `取消只看「${cat.label}」` : `只看「${cat.label}」`;
+    chip.addEventListener("click", () => actions.toggleCategory(cat.id));
+    return chip;
+  })) : null;
 
   const rail = h("aside", "cal-rail", null, [
     renderMiniMonth(state, byDay, todayIso, actions),
@@ -739,6 +746,7 @@ function mount(host, context) {
     weekStart: mondayOf(todayIso),
     miniMonth: todayIso.slice(0, 7),
     hiddenCals: readHiddenCalendars(),
+    activeCats: new Set(),
     selectedEvent: null,
   };
 
@@ -789,6 +797,11 @@ function mount(host, context) {
       if (state.hiddenCals.has(calId)) state.hiddenCals.delete(calId);
       else state.hiddenCals.add(calId);
       writeHiddenCalendars(state.hiddenCals);
+      draw();
+    },
+    toggleCategory(catId) {
+      if (state.activeCats.has(catId)) state.activeCats.delete(catId);
+      else state.activeCats.add(catId);
       draw();
     },
     setView(v) { state.view = v; draw(); },

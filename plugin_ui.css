@@ -50,6 +50,18 @@
   --cal-slate-fg: #3730a3;
   --cal-slate-sub: #4f46e5;
 
+  --cal-teal-bar: #14b8a6;
+  --cal-teal-bg: #ccfbf1;
+  --cal-teal-bg-hover: #99f6e4;
+  --cal-teal-fg: #115e59;
+  --cal-teal-sub: #0d9488;
+
+  --cal-orange-bar: #f97316;
+  --cal-orange-bg: #ffedd5;
+  --cal-orange-bg-hover: #fed7aa;
+  --cal-orange-fg: #9a3412;
+  --cal-orange-sub: #ea580c;
+
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -108,6 +120,18 @@
     --cal-slate-bg-hover: rgba(99, 102, 241, 0.28);
     --cal-slate-fg: #c7d2fe;
     --cal-slate-sub: #a5b4fc;
+
+    --cal-teal-bar: #2dd4bf;
+    --cal-teal-bg: rgba(20, 184, 166, 0.18);
+    --cal-teal-bg-hover: rgba(20, 184, 166, 0.26);
+    --cal-teal-fg: #99f6e4;
+    --cal-teal-sub: #5eead4;
+
+    --cal-orange-bar: #fb923c;
+    --cal-orange-bg: rgba(249, 115, 22, 0.18);
+    --cal-orange-bg-hover: rgba(249, 115, 22, 0.26);
+    --cal-orange-fg: #fed7aa;
+    --cal-orange-sub: #fdba74;
   }
 }
 
@@ -157,6 +181,18 @@
   --cal-slate-bg-hover: rgba(99, 102, 241, 0.28);
   --cal-slate-fg: #c7d2fe;
   --cal-slate-sub: #a5b4fc;
+
+  --cal-teal-bar: #2dd4bf;
+  --cal-teal-bg: rgba(20, 184, 166, 0.18);
+  --cal-teal-bg-hover: rgba(20, 184, 166, 0.26);
+  --cal-teal-fg: #99f6e4;
+  --cal-teal-sub: #5eead4;
+
+  --cal-orange-bar: #fb923c;
+  --cal-orange-bg: rgba(249, 115, 22, 0.18);
+  --cal-orange-bg-hover: rgba(249, 115, 22, 0.26);
+  --cal-orange-fg: #fed7aa;
+  --cal-orange-sub: #fdba74;
 }
 
 .cal-c-sky { --ev-bar: var(--cal-sky-bar); --ev-bg: var(--cal-sky-bg); --ev-bg-hover: var(--cal-sky-bg-hover); --ev-fg: var(--cal-sky-fg); --ev-sub: var(--cal-sky-sub); }
@@ -165,6 +201,8 @@
 .cal-c-sand { --ev-bar: var(--cal-sand-bar); --ev-bg: var(--cal-sand-bg); --ev-bg-hover: var(--cal-sand-bg-hover); --ev-fg: var(--cal-sand-fg); --ev-sub: var(--cal-sand-sub); }
 .cal-c-rose { --ev-bar: var(--cal-rose-bar); --ev-bg: var(--cal-rose-bg); --ev-bg-hover: var(--cal-rose-bg-hover); --ev-fg: var(--cal-rose-fg); --ev-sub: var(--cal-rose-sub); }
 .cal-c-slate { --ev-bar: var(--cal-slate-bar); --ev-bg: var(--cal-slate-bg); --ev-bg-hover: var(--cal-slate-bg-hover); --ev-fg: var(--cal-slate-fg); --ev-sub: var(--cal-slate-sub); }
+.cal-c-teal { --ev-bar: var(--cal-teal-bar); --ev-bg: var(--cal-teal-bg); --ev-bg-hover: var(--cal-teal-bg-hover); --ev-fg: var(--cal-teal-fg); --ev-sub: var(--cal-teal-sub); }
+.cal-c-orange { --ev-bar: var(--cal-orange-bar); --ev-bg: var(--cal-orange-bg); --ev-bg-hover: var(--cal-orange-bg-hover); --ev-fg: var(--cal-orange-fg); --ev-sub: var(--cal-orange-sub); }
 
 @keyframes calFadeIn {
   from { opacity: 0; transform: translateY(4px); }
@@ -1334,25 +1372,47 @@
   * { transition: none !important; }
 }
 
-/* 语义颜色极简图例 */
+/* 动态分类图例：支持任意数量分类折行展示，点击一键过滤 */
 .cal-legend {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  background: var(--cal-bg);
-  border: 1px solid var(--cal-line-soft);
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
-.cal-legend__item {
+.cal-legend__chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 550;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--cal-line);
+  background: var(--cal-bg);
   color: var(--cal-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms var(--cal-ease), color 100ms var(--cal-ease), border-color 100ms var(--cal-ease), transform 90ms var(--cal-ease);
+}
+
+.cal-legend__chip:hover {
+  background: var(--ev-bg);
+  color: var(--ev-fg);
+  border-color: transparent;
+}
+
+.cal-legend__chip:active {
+  transform: scale(0.96);
+}
+
+.cal-legend__chip[aria-pressed="true"] {
+  background: var(--ev-bg);
+  color: var(--ev-fg);
+  border-color: var(--ev-bar);
+}
+
+.cal-legend__chip.is-dimmed {
+  opacity: 0.45;
 }
 
 .cal-legend__dot {

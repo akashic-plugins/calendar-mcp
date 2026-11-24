@@ -27,6 +27,7 @@ Calendar HTTP/Google，也不写正式 Content 或 Calendar 数据。
 - `.gcp-saved-tokens.json`：OAuth Token
 - `content.json`：Content 日历来源配置
 - `calendar_alerts.sqlite3`：提醒确认状态
+- `categories.json`：侧栏面板语义分类与着色规则（支持关键词、`re:` 正则、日历匹配与 `[category:<id>]` 显式标记；按文件修改时间热重载，无需重启）
 - 运行日志：只写 stdout/stderr，由 Core 的 bounded log ring 收集
 
 从 v2 升级时，先停止占用该 workspace 的 Akashic，再从带 Core 依赖的环境执行：
