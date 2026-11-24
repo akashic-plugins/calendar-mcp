@@ -314,7 +314,7 @@ function renderCompact(state, panel, onRefresh, onSelectEvent) {
   }
 
   sections.push(h("div", "cal-compact__foot", null, [
-    btn("cal-btn cal-btn--primary", "展开周视图", () => panel.expand()),
+    btn("cal-btn cal-btn--primary", "展开周视图", () => panel.setSize("expanded")),
     btn("cal-btn cal-btn--icon", "↻", onRefresh, { "aria-label": "刷新日程", title: "刷新" }),
   ]));
 
@@ -452,38 +452,48 @@ function renderExpanded(state, actions) {
     allDayRow.style.setProperty("--cal-cols", String(days.length));
   }
 
-  // 时间刻度列
-  const nowDate = new Date();
-  const nowMins = nowDate.getHours() * 60 + nowDate.getMinutes();
+  // 解析后端 ISO 本地时间分量，避免浏览器与服务端时区不一致
+  const parseLocalMinutes = (isoStr) => {
+    const hh = Number(isoStr.slice(11, 13)) || 0;
+    const mm = Number(isoStr.slice(14, 16)) || 0;
+    return hh * 60 + mm;
+  };
+  const nowIso = data.now || new Date().toISOString();
+  const nowMins = parseLocalMinutes(nowIso);
   const nowTopPx = (nowMins / 60) * HOUR_H;
   const hasTodayInView = days.includes(todayIso);
 
   const gutterChildren = [];
   for (let hr = 1; hr < 24; hr++) {
+    const hrTop = hr * HOUR_H;
+    // 当前时间胶囊附近隐藏整点刻度，防止文字重叠
+    if (hasTodayInView && Math.abs(hrTop - nowTopPx) < 16) continue;
     const label = h("span", "cal-gutter__hour", `${pad2(hr)}:00`);
-    label.style.top = `${hr * HOUR_H}px`;
+    label.style.top = `${hrTop}px`;
     gutterChildren.push(label);
   }
   if (hasTodayInView) {
-    const pill = h("span", "cal-nowpill", `${pad2(nowDate.getHours())}:${pad2(nowDate.getMinutes())}`);
+    const pill = h("span", "cal-nowpill", nowIso.slice(11, 16));
     pill.style.top = `${nowTopPx}px`;
     gutterChildren.push(pill);
   }
   const gutter = h("div", "cal-gutter", null, gutterChildren);
 
-  // 每天的事件列
+  // 每天的事件列（按事件 ISO 本地日期与分钟定位）
   const timedEvents = events.filter((ev) => !ev.all_day);
   const dayCols = days.map((iso) => {
-    const dayStartTs = parseIsoDate(iso).getTime() / 1000;
-    const dayEndTs = dayStartTs + 86400;
     const rawItems = [];
 
     for (const ev of timedEvents) {
-      if (ev.end_ts <= dayStartTs || ev.start_ts >= dayEndTs) continue;
-      const clampedStart = Math.max(ev.start_ts, dayStartTs);
-      const clampedEnd = Math.min(ev.end_ts, dayEndTs);
-      const startMin = (clampedStart - dayStartTs) / 60;
-      const endMin = Math.max(startMin + 18, (clampedEnd - dayStartTs) / 60);
+      const sDay = ev.start.slice(0, 10);
+      const eDay = ev.end.slice(0, 10);
+      if (iso < sDay || iso > eDay) continue;
+      const startMin = iso === sDay ? parseLocalMinutes(ev.start) : 0;
+      let endMin = iso === eDay ? parseLocalMinutes(ev.end) : 1440;
+      // 恰好结束于次日 00:00 的事件不在次日多画一块
+      if (iso === eDay && iso > sDay && endMin === 0) continue;
+      if (endMin <= startMin) endMin = Math.min(1440, startMin + 25);
+      else endMin = Math.max(startMin + 20, endMin);
       rawItems.push({ ev, startMin, endMin });
     }
 
@@ -722,7 +732,7 @@ function mount(host, context) {
 
     if (!state.didAutoScroll) {
       state.didAutoScroll = true;
-      const target = Math.max(7.5 * HOUR_H, nowTopPx - 2.2 * HOUR_H);
+      const target = nowTopPx > 20 * HOUR_H ? 7.5 * HOUR_H : Math.max(7.5 * HOUR_H, nowTopPx - 2.2 * HOUR_H);
       scroll.scrollTop = Math.min(target, 16 * HOUR_H);
     } else if (prevScrollTop != null) {
       scroll.scrollTop = prevScrollTop;
