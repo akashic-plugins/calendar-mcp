@@ -414,14 +414,12 @@ async def apply(ctx: Context) -> None:
             refresh = bool(payload.get("refresh", False))
             if method == "summary":
                 return await panel_service.summary(refresh=refresh)
-            if method == "range":
+            if method in ("snapshot", "range"):
                 start = payload.get("start")
                 end = payload.get("end")
-                month = payload.get("month")
-                return await panel_service.range_view(
+                return await panel_service.snapshot(
                     start=start if isinstance(start, str) else None,
                     end=end if isinstance(end, str) else None,
-                    month=month if isinstance(month, str) else None,
                     refresh=refresh,
                 )
             raise PluginUiRpcInvalidRequest(f"calendar 面板不支持的方法：{method}")
