@@ -1333,3 +1333,39 @@
   .cal-anim, .cal-popover-backdrop, .cal-popover { animation: none; }
   * { transition: none !important; }
 }
+
+/* 语义颜色极简图例 */
+.cal-legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--cal-bg);
+  border: 1px solid var(--cal-line-soft);
+}
+
+.cal-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 550;
+  color: var(--cal-muted);
+}
+
+.cal-legend__dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ev-bar);
+}
+
+.cal-popover__inline-link {
+  color: var(--ev-sub);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}

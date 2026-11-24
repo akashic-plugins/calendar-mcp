@@ -184,6 +184,24 @@ function layoutDayEvents(items) {
   return placed;
 }
 
+
+function renderRichDesc(text) {
+  const box = h("div", "cal-popover__desc");
+  const re = /(https?:\/\/[^\s\u3000)）\]】>]+)/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > last) box.append(document.createTextNode(text.slice(last, m.index)));
+    const a = h("a", "cal-popover__inline-link", m[1]);
+    a.href = m[1];
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    box.append(a);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) box.append(document.createTextNode(text.slice(last)));
+  return box;
+}
+
 function renderPopover(ev, onClose) {
   const backdrop = h("div", "cal-popover-backdrop");
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) onClose(); });
@@ -201,7 +219,7 @@ function renderPopover(ev, onClose) {
       btn("cal-btn cal-btn--ghost cal-btn--icon", "×", onClose, { "aria-label": "关闭" }),
     ]),
     h("div", "cal-popover__rows", null, rows),
-    ev.description ? h("div", "cal-popover__desc", ev.description) : null,
+    ev.description ? renderRichDesc(ev.description) : null,
     ev.html_link ? (() => {
       const a = h("a", "cal-popover__link", "在 Google 日历中打开");
       a.href = ev.html_link; a.target = "_blank"; a.rel = "noopener noreferrer";
@@ -650,8 +668,19 @@ function renderExpanded(state, data, actions) {
     return row;
   });
 
+  const legend = h("div", "cal-legend", null, [
+    ["rose", "考试"],
+    ["sand", "DDL"],
+    ["sage", "复习"],
+    ["lavender", "待核"],
+  ].map(([c, label]) => h("span", `cal-legend__item cal-c-${c}`, null, [
+    h("i", "cal-legend__dot"),
+    document.createTextNode(label),
+  ])));
+
   const rail = h("aside", "cal-rail", null, [
     renderMiniMonth(state, byDay, todayIso, actions),
+    legend,
     upcomingSection,
     calRows.length ? h("div", "cal-cals", null, calRows) : null,
   ]);
