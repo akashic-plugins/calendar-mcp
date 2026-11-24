@@ -115,6 +115,23 @@ def _parse_iso(value: str, local_tz) -> datetime:
     return parsed.astimezone(local_tz)
 
 
+
+def _semantic_color(summary: str, cal_id: str, fallback: str) -> str:
+    """按事件标题语义映射透亮色系：红=考试/Quiz、琥珀=DDL/作业、绿=复习/准备、紫=待核/暂定、靛=节假日。"""
+    if "holiday" in cal_id.lower():
+        return "slate"
+    s = summary.lower()
+    if any(k in s for k in ("[待核", "[暂定", "暂定", "待核")):
+        return "lavender"
+    if any(k in s for k in ("[复习", "[备考", "[准备", "复习", "备考", "冲刺")):
+        return "sage"
+    if any(k in s for k in ("[期末考", "[考试", "[quiz", "final exam", " exam", "quiz")):
+        return "rose"
+    if any(k in s for k in ("[ddl", "due", "assignment", "homework", "report", "ppt", "closes", "截止")):
+        return "sand"
+    return fallback
+
+
 def _normalize_event(
     raw: Mapping[str, object],
     *,
@@ -157,7 +174,8 @@ def _normalize_event(
         return None
 
     event_color_id = raw.get("colorId") or raw.get("color_id")
-    color = _GOOGLE_COLOR_MAP.get(str(event_color_id), cal_color) if event_color_id else cal_color
+    base_color = _GOOGLE_COLOR_MAP.get(str(event_color_id), cal_color) if event_color_id else cal_color
+    color = _semantic_color(str(raw.get("summary") or ""), cal_id, base_color) if not event_color_id else base_color
 
     response_status = ""
     attendees = raw.get("attendees")
