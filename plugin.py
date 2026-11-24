@@ -24,6 +24,8 @@ from plugins.plugin_settings.contract import (
 )
 from plugins.mcp.contract import MCP_SERVERS, EndpointEnv, McpServerDefinition
 from plugins.timer.contract import TIMERS, OneShotTimer, TimerHandle, TimerStatus
+from plugins.ui.contract import UI_SLOTS, PluginUiDefinition, PluginUiRpcInvalidRequest
+from .panel import CalendarPanelService
 
 
 logger = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ CALENDAR_PROCESS = ManagedProcessDefinition(
 
 api_version = 3
 name = "calendar"
-version = "3.4.0"
+version = "3.5.0"
 desc = "Google Calendar MCP and Watch event source plugin"
 inject = (TOOLS, MANAGED_PROCESSES, MCP_SERVERS, TIMERS, CREDENTIALS)
 
@@ -396,6 +398,45 @@ async def apply(ctx: Context) -> None:
         apply_watch,
         name="calendar-watch-source",
     )
+
+    # 3. UI_SLOTS 存在时挂载侧栏「日程」面板（紧凑行动卡 + 展开周视图）。
+    panel_service = CalendarPanelService(ctx, calendar_process)
+
+    async def apply_panel_ui(ui_ctx: Context) -> None:
+        async def query(
+            method: str,
+            payload: dict[str, object],
+            *,
+            session_id: str | None,
+            turn_id: str | None,
+        ) -> dict[str, object]:
+            del session_id, turn_id
+            refresh = bool(payload.get("refresh", False))
+            if method == "summary":
+                return await panel_service.summary(refresh=refresh)
+            if method == "range":
+                start = payload.get("start")
+                end = payload.get("end")
+                month = payload.get("month")
+                return await panel_service.range_view(
+                    start=start if isinstance(start, str) else None,
+                    end=end if isinstance(end, str) else None,
+                    month=month if isinstance(month, str) else None,
+                    refresh=refresh,
+                )
+            raise PluginUiRpcInvalidRequest(f"calendar 面板不支持的方法：{method}")
+
+        _ = await ui_ctx.require(UI_SLOTS).register_plugin_ui(
+            ui_ctx,
+            PluginUiDefinition(
+                module="plugin_ui.js",
+                stylesheet="plugin_ui.css",
+                slots=("sidebar.panels",),
+            ),
+            query=query,
+        )
+
+    _ = await ctx.inject((UI_SLOTS,), apply_panel_ui, name="calendar-panel-ui")
 
 
 def _alert_item(item: Mapping[str, object]) -> tuple[str, Mapping[str, object]]:

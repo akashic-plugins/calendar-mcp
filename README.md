@@ -1,12 +1,15 @@
 # calendar-mcp
 
 Google Calendar 的 Akashic 插件，使用 Plugin API v3 提供日历 MCP、受管 API
-进程和普通 Content source。
+进程、侧栏只读日程面板（`sidebar.panels`）和普通 Content source。
 
 ```text
 calendar-mcp
 ├─ akashic.plugin.toml
 ├─ plugin.py
+├─ panel.py
+├─ plugin_ui.js
+├─ plugin_ui.css
 └─ mcp
    ├─ run_mcp.py
    ├─ run_server.py
